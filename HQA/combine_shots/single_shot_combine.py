@@ -6,7 +6,26 @@ import json
 import time
 import datetime
 
+def create_dataset_auto(group, name, data, compression, compression_opts, shuffle):
+    arr = np.asarray(data)
+    if arr.shape == ():  # skalar
+        return group.create_dataset(name, data=data)
+    return group.create_dataset(
+        name,
+        data=data,
+        compression=compression,
+        compression_opts=compression_opts,
+        shuffle=shuffle,
+        chunks=True,
+    )
+
 def main():
+    
+    compression = 'gzip'
+    compression_opts = 4
+    shuffle = True
+    chunks = False
+    
     # Check if running in real-time (spinning top) mode by checking if lyse.path is set
     try:
         h5_path = lyse.path
@@ -231,21 +250,28 @@ def main():
                             except Exception:
                                 new_ds.attrs[akey] = json.dumps(aval, default=str)
 
-        # Instead of copying whole '/results', copy only result names and values
-        # as attributes on the placeholder dataset (like globals).
+        # Copy all results from '/results' group
+        # This includes both scalar results (as attributes) and array results (as datasets)
         if 'results' in src:
+            results_group = shot_group.require_group('Results')
+            
             for grp_name in src['results'].keys():
                 grp = src['results'][grp_name]
+                
                 # Copy attributes saved in the results group (these are typical save_result entries)
                 for akey, aval in grp.attrs.items():
                     attr_name = f"{grp_name}/{akey}"
                     try:
                         ds.attrs[attr_name] = aval
                     except (TypeError, ValueError):
-                        ds.attrs[attr_name] = json.dumps(aval, default=str)
+                        try:
+                            ds.attrs[attr_name] = json.dumps(aval, default=str)
+                        except Exception:
+                            ds.attrs[attr_name] = str(aval)
 
                 # For any datasets under the results group (arrays), capture scalar or
-                # single-element datasets as values; otherwise store metadata.
+                # single-element datasets as values; otherwise copy array data to combined file.
+                grp_result_group = results_group.require_group(grp_name)
                 for item_name in grp.keys():
                     item = grp[item_name]
                     if isinstance(item, h5.Dataset):
@@ -254,15 +280,62 @@ def main():
                             # If scalar or single-element, store the value directly
                             if np.isscalar(data) or (hasattr(data, 'shape') and np.prod(data.shape) == 1):
                                 try:
-                                    val = data.item() if hasattr(data, 'item') else data.tolist()[0]
+                                    val = data.item() if hasattr(data, 'item') else data.tolist()[0] if hasattr(data, 'tolist') else data
                                     ds.attrs[f"{grp_name}/{item_name}"] = val
                                 except Exception:
                                     ds.attrs[f"{grp_name}/{item_name}"] = json.dumps(data.tolist() if hasattr(data, 'tolist') else str(data), default=str)
                             else:
-                                meta = {'dtype': str(item.dtype), 'shape': item.shape}
-                                ds.attrs[f"{grp_name}/{item_name}"] = json.dumps(meta)
+                                # For array data, store it as a dataset in a results group
+                                # Use unique name if it already exists
+                                ds_name = item_name
+                                counter = 1
+                                while ds_name in grp_result_group:
+                                    ds_name = f"{item_name}_{counter}"
+                                    counter += 1
+                                
+                                try:
+                                    # Copy the array dataset
+                                    grp_result_group.create_dataset(ds_name, data=data, compression=compression, compression_opts=compression_opts, shuffle=shuffle, chunks=chunks)
+                                    # Also copy attributes from the source dataset
+                                    for src_akey, src_aval in item.attrs.items():
+                                        try:
+                                            grp_result_group[ds_name].attrs[src_akey] = src_aval
+                                        except Exception:
+                                            grp_result_group[ds_name].attrs[src_akey] = str(src_aval)
+                                except Exception:
+                                    # If that fails, store metadata
+                                    meta = {'dtype': str(item.dtype), 'shape': list(item.shape)}
+                                    ds.attrs[f"{grp_name}/{item_name}"] = json.dumps(meta)
                         except Exception:
                             ds.attrs[f"{grp_name}/{item_name}"] = '<<unreadable>>'
+        
+        # Copy any additional top-level datasets that contain analysis data
+        # (e.g., 'shot number', or other data at root level)
+        for key in src.keys():
+            if key not in ('globals', 'images', 'results') and isinstance(src[key], h5.Dataset):
+                try:
+                    data = src[key][()]
+                    # Store as attribute if scalar, otherwise as dataset
+                    if np.isscalar(data) or (hasattr(data, 'shape') and np.prod(data.shape) == 1):
+                        try:
+                            val = data.item() if hasattr(data, 'item') else data.tolist()[0] if hasattr(data, 'tolist') else data
+                            ds.attrs[key] = val
+                        except Exception:
+                            ds.attrs[key] = json.dumps(data.tolist() if hasattr(data, 'tolist') else str(data), default=str)
+                    else:
+                        # Store array as dataset
+                        misc_group = shot_group.require_group('MiscData')
+                        ds_name = key
+                        counter = 1
+                        while ds_name in misc_group:
+                            ds_name = f"{key}_{counter}"
+                            counter += 1
+                        try:
+                            misc_group.create_dataset(ds_name, data=data, compression=compression, compression_opts=compression_opts, shuffle=shuffle, chunks=chunks)
+                        except Exception:
+                            ds.attrs[key] = str(data)
+                except Exception:
+                    pass
 
     # If requested by globals, delete duplicate shots (keep the first/earliest)
     def _truthy(val):

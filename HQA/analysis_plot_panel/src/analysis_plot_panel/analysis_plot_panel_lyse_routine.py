@@ -9,8 +9,8 @@ import numpy as np
 
 from __init__ import AnalysisPlotPanel
 
-from user_plots import ImagingPlot, SpectrumPlot, MultiSpectrumPlot, TracePlot
-from user_data_extractors import FluoDataExtractor, AbsorptionDataExtractor, SpectrumDataExtractor, ScopeDataExtractor
+from user_plots import ImagingPlot, SpectrumPlot, MultiSpectrumPlot, TracePlot, FluoBackgroundPlot, ADwinTracesPlot
+from user_data_extractors import FluoDataExtractor, AbsorptionDataExtractor, SpectrumDataExtractor, ScopeDataExtractor, FluoBackgroundDataExtractor, ADwinTracesDataExtractor
 from data_extractors import MultiDataExtractor
 
 
@@ -26,29 +26,38 @@ from data_extractors import MultiDataExtractor
 
 fm = lyse.figure_manager
 
-h5_paths = lyse.h5_paths()
+# Try to get the current shot path and data
+# Always get ALL h5_paths from lyse.data() for proper plotting
+try:
+    h5_paths = lyse.data()
+    if h5_paths is not None and len(h5_paths) > 0:
+        h5_path = h5_paths.filepath.iloc[-1]
+    else:
+        h5_path = None
+except (AttributeError, KeyError, TypeError):
+    # Fallback: try to get spinning top path if available
+    try:
+        if lyse.spinning_top:
+            h5_path = lyse.path
+        else:
+            h5_path = None
+    except:
+        h5_path = None
+    h5_paths = None
 
-if lyse.spinning_top:
-    # If so, use the filepath of the current shot
-    h5_path = lyse.path
-else:
-    # If not, get the filepath of the last shot of the lyse DataFrame
-    h5_path = lyse.h5_paths().iloc[-1]
-
-if len(h5_paths):
-    last_globals = run = lyse.Run(h5_paths.iloc[-1]).get_globals()
+if h5_paths is not None and len(h5_paths):
+    last_globals = run = lyse.Run(h5_paths.filepath.iloc[-1]).get_globals()
 
 if not hasattr(fm, 'ap'):
-    fm.ap = AnalysisPlotPanel(h5_paths)
+    fm.ap = AnalysisPlotPanel(h5_paths if h5_paths is not None else lyse.data())
 
 
 
 # Imaging Methods
-imagings = ['fluo_imaging', 'absorption_imaging', 'mot_counting']
+imagings = ['fluo_imaging', 'absorption_imaging']
 
-cams = {'fluo_imaging': ['Cam_fluorescence', 
-                          'Cam_fluorescence_side'], 
-        'absorption_imaging': ['Cam_absorption'],
+cams = {'fluo_imaging': [],
+        'absorption_imaging': [],
         'mot_counting': ['MOT_Counting']}
 
 
@@ -71,14 +80,28 @@ for cam in cams[imaging]:
         
         fm.ap.add_plot_dock(plot_name, ip, AbsorptionDataExtractor(imaging, cam))
 
-imaging = 'mot_counting'
-for cam in cams[imaging]:
-    plot_name = imaging + ' ' + cam
+# Fluorescence background analysis plot
+for cam in ['MOT_Counting']:
+    plot_name = 'fluo_background ' + cam
     
-    if not plot_name in fm.ap.plots:        
-        ip = ImagingPlot(plot_name)
-        
-        fm.ap.add_plot_dock(plot_name, ip, FluoDataExtractor(imaging, cam))
+    if not plot_name in fm.ap.plots:
+        fbp = FluoBackgroundPlot(plot_name)
+        fm.ap.add_plot_dock(plot_name, fbp, FluoBackgroundDataExtractor(cam))
+
+# ADwin analog input traces plot
+plot_name = 'ADwin Traces'
+if not plot_name in fm.ap.plots:
+    atp = ADwinTracesPlot(plot_name)
+    fm.ap.add_plot_dock(plot_name, atp, ADwinTracesDataExtractor())
+
+#imaging = 'mot_counting'
+#for cam in cams[imaging]:
+#    plot_name = imaging + ' ' + cam
+#    
+#    if not plot_name in fm.ap.plots:        
+#        ip = ImagingPlot(plot_name)
+#        
+#        fm.ap.add_plot_dock(plot_name, ip, FluoDataExtractor(imaging, cam))
 
 
 # Spectra

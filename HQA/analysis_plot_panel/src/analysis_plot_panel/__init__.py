@@ -8,6 +8,7 @@ Created on Wed Mar 10 15:35:59 2021
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore
 import numpy as np
+import sys
 
 from pyqtgraph.dockarea import *
 from PyQt5.QtWidgets import *
@@ -90,8 +91,17 @@ class ShotSelector(pg.LayoutWidget):
         self.slider.valueChanged.connect(self.setLabelValue)
     
     def update_nshots(self, nshots):
-        self.nshots = nshots
+        self.nshots = int(nshots)
         self.idx = np.arange(self.nshots)
+
+        if self.nshots <= 0:
+            self.idx_selected = SortedSet([])
+            self.slider.setRange(0, 0)
+            self.current_idx_le.setText('0')
+            self.update_warning('no shots loaded')
+            self.selectionChanged.emit()
+            return
+
         self.slider.setRange(0, self.nshots - 1)
         
         self.update_selection()
@@ -108,6 +118,13 @@ class ShotSelector(pg.LayoutWidget):
         self.warning.setText(warning)
         
     def update_selection(self):
+        if self.nshots <= 0:
+            self.idx_selected = SortedSet([])
+            self.slider.setRange(0, 0)
+            self.update_warning('no shots loaded')
+            self.selectionChanged.emit()
+            return
+
         self.update_warning()
         
         slice_text = self.idx_select_le.text()
@@ -141,6 +158,9 @@ class ShotSelector(pg.LayoutWidget):
         self.selectionChanged.emit()
             
     def setLabelValue(self, value):
+        if not hasattr(self, 'idx_selected') or len(self.idx_selected) == 0:
+            return
+
         newval = self.idx_selected[value]
         
         if newval != self.get_current_index():
@@ -149,6 +169,9 @@ class ShotSelector(pg.LayoutWidget):
             self.valueChanged.emit()
         
     def setSliderValue(self):
+        if self.nshots <= 0:
+            return
+
         self.update_warning()
         
         value = int(self.current_idx_le.text())
@@ -160,10 +183,14 @@ class ShotSelector(pg.LayoutWidget):
             self.update_warning('set index not in selection <br> ignore')
     
     def get_current_index(self):
+        if self.nshots <= 0:
+            return 0
         return int(self.current_idx_le.text())%self.nshots
     
     def get_selected_indices(self):
-        return (np.array(self.idx_selected),)
+        if not hasattr(self, 'idx_selected') or len(self.idx_selected) == 0:
+            return np.array([], dtype=int)
+        return np.array(list(self.idx_selected))
             
         
 class AnalysisPlotPanel(QMainWindow):
@@ -186,8 +213,14 @@ class AnalysisPlotPanel(QMainWindow):
         
         self.dshotselector = Dock("Shot selector")
         self.shotselector = ShotSelector()
+        self.shotselector_container = pg.LayoutWidget()
+        self.bt_remove_all_shots = QPushButton('Remove all shots from lyse queue', self)
+        self.bt_remove_all_shots.clicked.connect(self.remove_all_shots_from_lyse_queue)
+        self.shotselector_container.addWidget(self.shotselector, colspan=2)
+        self.shotselector_container.nextRow()
+        self.shotselector_container.addWidget(self.bt_remove_all_shots, colspan=2)
         
-        self.dshotselector.addWidget(self.shotselector)
+        self.dshotselector.addWidget(self.shotselector_container)
         self.area.addDock(self.dshotselector, 'bottom')
         
         self.qpg_dock = Dock("Quick Plot Generator")
@@ -200,11 +233,85 @@ class AnalysisPlotPanel(QMainWindow):
         
         self.plots = {}
         self.data_extractor_manager = DataExtractorManager()
+
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.setSingleShot(True)
+        self._refresh_timer.timeout.connect(self._refresh_now)
+        self._pending_h5_path = None
+        self._refresh_debounce_ms = 40
         
         self.shotselector.valueChanged.connect(self.refresh)
         self.shotselector.selectionChanged.connect(self.refresh)
         
         self.df = lyse.data()
+
+    def remove_all_shots_from_lyse_queue(self):
+        try:
+            current_nshots = len(self.h5_paths) if self.h5_paths is not None else 0
+            if current_nshots == 0:
+                QMessageBox.information(self, 'Lyse queue', 'Lyse queue is already empty.')
+                return
+
+            answer = QMessageBox.question(
+                self,
+                'Remove all shots',
+                f'Remove all {current_nshots} shots from the lyse queue?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+            app = None
+            for module_name in ('lyse.__main__', '__main__'):
+                module = sys.modules.get(module_name)
+                if module is not None:
+                    candidate = getattr(module, 'app', None)
+                    if candidate is not None and hasattr(candidate, 'filebox'):
+                        app = candidate
+                        break
+
+            if app is None:
+                qapp = QApplication.instance()
+                if qapp is not None:
+                    for widget in qapp.topLevelWidgets():
+                        candidate = getattr(widget, 'app', None)
+                        if candidate is not None and hasattr(candidate, 'filebox'):
+                            app = candidate
+                            break
+
+            if app is not None and hasattr(app.filebox, 'shots_model'):
+                shots_model = app.filebox.shots_model
+                table_view = app.filebox.ui.tableView
+
+                table_view.selectAll()
+                shots_model.remove_selection(confirm=False)
+                table_view.clearSelection()
+            else:
+                try:
+                    from labscript_utils.ls_zprocess import zmq_get
+                    port = int(getattr(lyse, '_lyse_port', 42519))
+                    response = zmq_get(port, 'localhost', 'clear shots', timeout=5)
+                    if isinstance(response, str) and response.startswith('error'):
+                        raise RuntimeError(response)
+                except Exception as remote_error:
+                    QMessageBox.warning(
+                        self,
+                        'Lyse queue',
+                        'Could not access running lyse GUI instance and remote clear request failed.\n'
+                        f'{remote_error}'
+                    )
+                    return
+
+            refreshed_paths = lyse.data()
+            nshots = len(refreshed_paths) if refreshed_paths is not None else 0
+            if nshots == 0:
+                QMessageBox.information(self, 'Lyse queue', 'Lyse queue cleared.')
+
+            self.update_h5_paths(refreshed_paths)
+            self.refresh()
+        except Exception as e:
+            QMessageBox.warning(self, 'Lyse queue', f'Failed to clear lyse queue:\n{e}')
         
     def add_plot_dock(self, plot_name,plot_widget, data_extractor, **kwargs):
         if plot_name not in self.plots:
@@ -236,27 +343,78 @@ class AnalysisPlotPanel(QMainWindow):
             print (f'Plot {plot_name} already exists. Please choose different name.')
     
     def remove_plot(self ,dock):
-        del self.plots[dock.title()]
+        plot_name = dock.title()
+        if plot_name in self.plots:
+            plot_widget = self.plots[plot_name]
+            # Cleanup resources
+            try:
+                if hasattr(plot_widget, 'data_extractor'):
+                    plot_widget.data_extractor.clean_memory([])
+            except:
+                pass
+            # Remove from data extractor manager
+            if plot_name in self.data_extractor_manager.data_extractors:
+                del self.data_extractor_manager.data_extractors[plot_name]
+            del self.plots[plot_name]
         
     def update_h5_paths(self, h5_paths):
+        # Handle None case - get fresh data from lyse
+        if h5_paths is None:
+            try:
+                h5_paths = lyse.data()
+            except:
+                h5_paths = None
+        # Also update the dataframe
+        self.df = h5_paths
+        
         self.h5_paths = h5_paths
         
-        self.shotselector.update_nshots(len(h5_paths))
+        # Only update shot selector if we have valid data
+        if h5_paths is not None and hasattr(h5_paths, '__len__'):
+            try:
+                self.shotselector.update_nshots(len(h5_paths))
+            except TypeError:
+                # If h5_paths is not a proper sequence, log and continue
+                import logging
+                logging.debug(f"Could not get length of h5_paths: {h5_paths}")
         
         for plot_name, plot in self.plots.items():
-            plot.data_extractor.clean_memory(h5_paths)
+            if h5_paths is not None:
+                plot.data_extractor.clean_memory(h5_paths)
+            if hasattr(plot, 'update_combos'):
+                try:
+                    plot.update_combos(h5_paths)
+                except Exception as e:
+                    import logging
+                    logging.debug(f"Could not update combos for plot {plot_name}: {e}")
             
     def refresh(self, h5_path = None):
-        if len(self.h5_paths):
+        self._pending_h5_path = h5_path
+        if not self._refresh_timer.isActive():
+            self._refresh_timer.start(self._refresh_debounce_ms)
+
+    def _refresh_now(self):
+        h5_path = self._pending_h5_path
+        self._pending_h5_path = None
+
+        if self.h5_paths is not None and len(self.h5_paths):
 
             self.h5_paths_selected = self.h5_paths.iloc[self.shotselector.get_selected_indices()]
             
             
             if h5_path == None:
                 i = self.shotselector.get_current_index()
-                h5_path = self.h5_paths.iloc[i]
-                
+                h5_path = self.h5_paths.filepath.iloc[i]
             
+            # Ensure h5_path is a string, not a Series or tuple
+            if not isinstance(h5_path, str):
+                if hasattr(h5_path, 'values'):
+                    h5_path = str(h5_path.values[0]) if len(h5_path.values) > 0 else str(h5_path)
+                elif isinstance(h5_path, (list, tuple)):
+                    h5_path = str(h5_path[0]) if h5_path else None
+                else:
+                    h5_path = str(h5_path)
+                
             self.data_extractor_manager.update_local_data(h5_path)
             
             for plot_name, plot in self.plots.items():
@@ -283,6 +441,16 @@ class DataPlot(QSplitter):
         
         self.h5_path_shown = None
         
+    def cleanup(self):
+        """Clean up resources to prevent memory leaks"""
+        try:
+            if hasattr(self, 'plots') and self.plots is not None:
+                self.plots.deleteLater()
+            if hasattr(self, 'bottom') and self.bottom is not None:
+                self.bottom.deleteLater()
+        except:
+            pass
+        
     def update_from_h5(self, h5_path):
         if self.h5_path_shown != h5_path or self.data_extractor.local_data_changed:
             self.h5_path_shown = h5_path
@@ -300,7 +468,8 @@ class QuickDataPlot(DataPlot):
             # Fix Z value making the grid on top of the image
             ax.setZValue(1)
         self.ap = ap
-        self.h5_paths_shown = []
+        self.h5_paths_shown = tuple()
+        self._last_clean_paths_signature = None
         
         self.table = QTableWidget()
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
@@ -310,11 +479,29 @@ class QuickDataPlot(DataPlot):
         self.plot_setting = PlotSettings(self.plot)
         
         self.bottom.addWidget(self.plot_setting)
+
+    def get_all_h5_paths(self):
+        if self.ap.h5_paths is None:
+            return []
+        if hasattr(self.ap.h5_paths, 'filepath'):
+            return self.ap.h5_paths.filepath.tolist()
+        return list(self.ap.h5_paths)
+
+    def clean_data_extractor_if_needed(self):
+        current_paths = self.get_all_h5_paths()
+        current_signature = tuple(current_paths)
+        if self._last_clean_paths_signature != current_signature:
+            self.data_extractor.clean_memory(current_paths)
+            self._last_clean_paths_signature = current_signature
+        return current_paths
         
     def update_from_h5(self, h5_path = None):
         self.update_data_extractor()
-        if self.data_extractor.local_data_changed or collections.Counter(self.h5_paths_shown) != collections.Counter(self.ap.h5_paths_selected):
-            self.h5_paths_shown = self.ap.h5_paths_selected
+        current_paths = self.get_all_h5_paths()
+        current_signature = tuple(current_paths)
+
+        if self.data_extractor.local_data_changed or self.h5_paths_shown != current_signature:
+            self.h5_paths_shown = current_signature
             self.update()
 
 
@@ -473,28 +660,82 @@ class NumericDataCombo(ExtendedCombo):
     def __init__(self, df, **kwargs):
         
         super().__init__(**kwargs)
+        self._last_model_signature = None
+        self._committed_text = 'shot number'
+
+        self.currentIndexChanged.connect(self._commit_current_text)
+        if self.lineEdit() is not None:
+            self.lineEdit().editingFinished.connect(self._commit_current_text)
+
         self.update_model(df)
+
+    def _commit_current_text(self):
+        text = str(self.currentText())
+        if self.findText(text) >= 0:
+            self._committed_text = text
+
+    def get_stable_text(self):
+        text = str(self.currentText())
+        if self.findText(text) >= 0:
+            self._committed_text = text
+            return text
+        return self._committed_text
                 
     def update_model(self, df):
+        signature = None
+        if df is not None and hasattr(df, 'columns') and hasattr(df, 'dtypes'):
+            try:
+                signature = (
+                    tuple(df.columns.tolist()),
+                    tuple(str(df.dtypes[col]) for col in df.columns)
+                )
+            except Exception:
+                signature = None
+
+        if signature is not None and signature == self._last_model_signature:
+            return
+
+        current_text = str(self.currentText()) if self.count() else 'shot number'
         model = QStandardItemModel()
-        
-        
-        
+
         item = QStandardItem('shot number')
         model.setItem(0, 0, item)
-        
+
         i = 1
+        if df is None or not hasattr(df, 'columns') or not hasattr(df, 'dtypes'):
+            self.setModel(model)
+            self.setCurrentText('shot number')
+            return
+
+        added_labels = {'shot number'}
         for midx in df.columns:
             if is_numeric_dtype(df.dtypes[midx]):
-                column_name = ','.join([x for x in midx if x])
+                if isinstance(midx, tuple):
+                    column_name = ','.join([str(x) for x in midx if x not in (None, '')])
+                else:
+                    column_name = str(midx)
+
+                if not column_name or column_name in added_labels:
+                    continue
+
                 item = QStandardItem(column_name)
                 model.setItem(i, 0, item)
-                i+=1
+                i += 1
+                added_labels.add(column_name)
                 
         self.setModel(model)
+        self._last_model_signature = signature
+        if self.findText(current_text) >= 0:
+            self.setCurrentText(current_text)
+            self._committed_text = current_text
+        elif self.findText(self._committed_text) >= 0:
+            self.setCurrentText(self._committed_text)
+        else:
+            self.setCurrentText('shot number')
+            self._committed_text = 'shot number'
         
     def get_idx(self):
-        return tuple(str(self.currentText()).split(','))
+        return tuple(self.get_stable_text().split(','))
         
 class Quick1DPlot(QuickDataPlot):
     
@@ -503,19 +744,29 @@ class Quick1DPlot(QuickDataPlot):
         super().__init__(ap,**kwargs)        
         self.nplots = 0
         
-        self.table.setColumnCount(5)
+        self.table.setColumnCount(6)
         self.table.setRowCount(1)
         self.table.setColumnWidth(0, 200)
         self.table.setColumnWidth(1, 200)
         self.table.setColumnWidth(2, 30)
-        self.table.setColumnWidth(3, 30)
-        self.table.setColumnWidth(4, 40)
-        self.table.setHorizontalHeaderLabels(['xvalue', 'yvalue', 'color', 'show', 'scatter'])
+        self.table.setColumnWidth(3, 50)
+        self.table.setColumnWidth(4, 60)
+        self.table.setColumnWidth(5, 80)
+        self.table.setHorizontalHeaderLabels(['xvalue', 'yvalue', 'color', 'show', 'scatter', 'mean&err'])
          
         self.combos = []
         self.curves = []
+        self.error_bars = []
         self.show_cbs = []
         self.scatter_cbs = []
+        self.mean_error_cbs = []
+        self._last_curve_selection_signature = None
+        self._df_idx_map_cache = {}
+        self._df_idx_map_signature = None
+        self._combos_update_pending = False
+        self._combo_update_timer = QTimer(self)
+        self._combo_update_timer.setSingleShot(True)
+        self._combo_update_timer.timeout.connect(self._apply_pending_combo_updates)
         
         self.mk_buttons()
         
@@ -533,8 +784,8 @@ class Quick1DPlot(QuickDataPlot):
     def add_plot(self):
         self.nplots += 1
         self.table.setRowCount(self.nplots+1)
-        combox = NumericDataCombo(self.ap.df)
-        comboy = NumericDataCombo(self.ap.df)
+        combox = NumericDataCombo(self.ap.df if self.ap.df is not None else lyse.data())
+        comboy = NumericDataCombo(self.ap.df if self.ap.df is not None else lyse.data())
         
         self.combos += [[combox,comboy]]
         self.table.setCellWidget(self.nplots - 1, 0, combox)
@@ -547,6 +798,10 @@ class Quick1DPlot(QuickDataPlot):
         
         self.curves += [self.plot.plot(pen=pg.mkPen(color = color_palette[self.nplots - 1], width = 1.5), symbol ='x', symbolPen = None, symbolBrush = None)]
         
+        # Add ErrorBarItem for each curve
+        error_bar = pg.ErrorBarItem(pen=pg.mkPen(color=color_palette[self.nplots - 1], width=1.5))
+        self.plot.addItem(error_bar)
+        self.error_bars += [error_bar]
         
         self.show_cbs += [QCheckBox()]
         self.show_cbs[self.nplots - 1].setChecked(True)
@@ -558,7 +813,43 @@ class Quick1DPlot(QuickDataPlot):
         self.table.setCellWidget(self.nplots - 1, 4, self.scatter_cbs[self.nplots - 1])
         self.scatter_cbs[self.nplots - 1].stateChanged.connect(self.update_scatters)
         
+        self.mean_error_cbs += [QCheckBox()]
+        self.mean_error_cbs[self.nplots - 1].setChecked(False)
+        self.table.setCellWidget(self.nplots - 1, 5, self.mean_error_cbs[self.nplots - 1])
+        self.mean_error_cbs[self.nplots - 1].stateChanged.connect(self.update_from_h5)
+        
+        # Set row height to ensure checkboxes are visible
+        self.table.setRowHeight(self.nplots - 1, 25)
+        
         self.mk_buttons()
+
+    def update_combos(self, h5_paths):
+        """Update numeric combo models when h5_paths/df change"""
+        def combo_is_active(combo):
+            line_edit = combo.lineEdit()
+            return (
+                combo.hasFocus() or
+                (line_edit is not None and line_edit.hasFocus()) or
+                combo.view().isVisible()
+            )
+
+        if any(combo_is_active(combo) for pair in self.combos for combo in pair):
+            self._combos_update_pending = True
+            self._combo_update_timer.start(250)
+            return
+
+        try:
+            for combox, comboy in self.combos:
+                combox.update_model(self.ap.df)
+                comboy.update_model(self.ap.df)
+            self._combos_update_pending = False
+        except Exception as e:
+            import logging
+            logging.debug(f"Error updating Quick1DPlot combos: {e}")
+
+    def _apply_pending_combo_updates(self):
+        if self._combos_update_pending:
+            self.update_combos(self.ap.h5_paths)
     
         
     def update_shows(self):
@@ -575,60 +866,234 @@ class Quick1DPlot(QuickDataPlot):
             if cb.isChecked():
                 self.curves[k].setSymbolBrush(brush)
                 self.curves[k].setPen(None)
+                self.error_bars[k].hide()
             else:
-                self.curves[k].setSymbolBrush(None)
+                self.curves[k].setSymbolBrush(None and self.show_cbs[k].isChecked())
                 self.curves[k].setPen(pen)
+                if self.mean_error_cbs[k].isChecked():
+                    self.error_bars[k].show()
+                else:
+                    self.error_bars[k].hide()
 
         
     def update_data_extractor(self):
         
         idxxs = [combo[0].get_idx() for combo in self.combos]
         idxys = [combo[1].get_idx() for combo in self.combos]
+        curve_signature = tuple(idxxs + idxys)
+        if curve_signature != self._last_curve_selection_signature:
+            self.data_extractor.children_changed = True
+            self._last_curve_selection_signature = curve_signature
+
+        df_idx_map = self._build_numeric_df_index_map()
+        fallback_indices = []
+        for idx in idxxs + idxys:
+            if idx and idx[0] != 'shot number' and idx not in df_idx_map:
+                fallback_indices.append(idx)
+        fallback_indices = list(dict.fromkeys(fallback_indices))
         
-        for idxx in idxxs:
-            if idxx not in self.data_extractor.data_extractors:
-                if idxx[0] == 'shot number':
-                    self.data_extractor[idxx] = EmptyDataExtractor()
-                else:
-                    self.data_extractor[idxx] = SingleDataExtractor(idxx)
-                    
-        for idxy in idxys:
-            if idxy not in self.data_extractor.data_extractors:
-                if idxy[0] == 'shot number':
-                    self.data_extractor[idxy] = EmptyDataExtractor()
-                else:
-                    self.data_extractor[idxy] = SingleDataExtractor(idxy)
+        for idx in fallback_indices:
+            if idx not in self.data_extractor.data_extractors:
+                self.data_extractor[idx] = SingleDataExtractor(idx)
+
+        self.data_extractor.clean_children(fallback_indices)
+        if fallback_indices:
+            self.clean_data_extractor_if_needed()
+
+    def _build_numeric_df_index_map(self):
+        df = self.ap.df
+        if df is None or not hasattr(df, 'columns') or not hasattr(df, 'dtypes'):
+            self._df_idx_map_cache = {}
+            self._df_idx_map_signature = None
+            return {}
+
+        try:
+            signature = (
+                tuple(df.columns.tolist()),
+                tuple(str(df.dtypes[col]) for col in df.columns)
+            )
+        except Exception:
+            signature = None
+
+        if signature is not None and signature == self._df_idx_map_signature:
+            return self._df_idx_map_cache
+
+        idx_map = {}
+        for midx in df.columns:
+            try:
+                if not is_numeric_dtype(df.dtypes[midx]):
+                    continue
+            except Exception:
+                continue
+
+            if isinstance(midx, tuple):
+                label = ','.join([str(x) for x in midx if x not in (None, '')])
+            else:
+                label = str(midx)
+
+            if not label:
+                continue
+
+            idx_key = tuple(label.split(','))
+            if idx_key not in idx_map:
+                idx_map[idx_key] = midx
+
+        self._df_idx_map_cache = idx_map
+        self._df_idx_map_signature = signature
+        return idx_map
+
+    def _get_numeric_values_from_df(self, idx, n_points, df, df_idx_map):
+        if idx and idx[0] == 'shot number':
+            return np.arange(n_points, dtype=float)
+
+        col = df_idx_map.get(idx)
+        if col is None or df is None:
+            return None
+
+        try:
+            series = df[col]
+            values = np.asarray(series.to_numpy(), dtype=float)
+            if len(values) != n_points:
+                return None
+            return values
+        except Exception:
+            return None
+    
+    def calculate_mean_and_error(self, xs, ys):
+        """
+        Group data by x-values and calculate mean and standard error.
         
-        self.data_extractor.clean_children(idxxs + idxys)
-        self.data_extractor.clean_memory(self.ap.h5_paths)
+        Parameters
+        ----------
+        xs : numpy.ndarray
+            X-axis values
+        ys : numpy.ndarray
+            Y-axis values
+            
+        Returns
+        -------
+        mean_xs : numpy.ndarray
+            Unique x-values (sorted)
+        mean_ys : numpy.ndarray
+            Mean y-value for each x-value
+        std_errors : numpy.ndarray
+            Standard error for each x-value
+        """
+        # Remove NaN values
+        valid_mask = ~(np.isnan(xs) | np.isnan(ys))
+        xs_clean = xs[valid_mask]
+        ys_clean = ys[valid_mask]
+        
+        if len(xs_clean) == 0:
+            return np.array([]), np.array([]), np.array([])
+        
+        # Sort by x-values
+        sorted_indices = np.argsort(xs_clean)
+        xs_sorted = xs_clean[sorted_indices]
+        ys_sorted = ys_clean[sorted_indices]
+        
+        # Get unique x-values
+        unique_xs = np.unique(xs_sorted)
+        mean_ys = np.zeros_like(unique_xs)
+        std_errors = np.zeros_like(unique_xs)
+        
+        # Calculate mean and std error for each unique x-value
+        for i, x_val in enumerate(unique_xs):
+            y_values = ys_sorted[xs_sorted == x_val]
+            mean_ys[i] = np.mean(y_values)
+            std_errors[i] = np.std(y_values) / np.sqrt(len(y_values)) if len(y_values) > 1 else 0
+        
+        return unique_xs, mean_ys, std_errors
         
     def update(self, data = None):
         
-        Xs = np.zeros((self.nplots, len(self.ap.h5_paths_selected)))
-        Ys = np.zeros((self.nplots, len(self.ap.h5_paths_selected)))
+        # Extract ALL file paths to ensure all data is plotted
+        h5_paths_to_plot = self.get_all_h5_paths()
         
-        
+        if not h5_paths_to_plot:
+            # No data to plot  
+            return
 
-        for i, h5_path in enumerate(self.ap.h5_paths_selected):
-            
-            data = self.data_extractor.get_data(h5_path)[0]
-            
-            for k in range(self.nplots):
-                idxx = self.combos[k][0].get_idx()
-                idxy = self.combos[k][1].get_idx()
-                
-                if idxx[0] == 'shot number':
-                    Xs[k, i] =  self.ap.shotselector.get_selected_indices()[0][i]
-                else:
-                    Xs[k, i] = data[idxx]
-                    
-                if idxy[0] == 'shot number':
-                    Ys[k, i] =  self.ap.shotselector.get_selected_indices()[0][i]
-                else:
-                    Ys[k, i] = data[idxy]
+        idxxs = [combo[0].get_idx() for combo in self.combos]
+        idxys = [combo[1].get_idx() for combo in self.combos]
+        n_paths = len(h5_paths_to_plot)
+        df = self.ap.df
+        df_idx_map = self._build_numeric_df_index_map()
+        
+        # Use memory-efficient pre-allocated arrays instead of np.append in loop
+        Xs = np.full((self.nplots, n_paths), np.nan, dtype=float)
+        Ys = np.full((self.nplots, n_paths), np.nan, dtype=float)
+
+        x_sources = []
+        y_sources = []
+        fallback_plot_indices = []
+        for k in range(self.nplots):
+            x_vals = self._get_numeric_values_from_df(idxxs[k], n_paths, df, df_idx_map)
+            y_vals = self._get_numeric_values_from_df(idxys[k], n_paths, df, df_idx_map)
+            x_sources.append(x_vals)
+            y_sources.append(y_vals)
+
+            if x_vals is not None:
+                Xs[k, :] = x_vals
+            if y_vals is not None:
+                Ys[k, :] = y_vals
+
+            if x_vals is None or y_vals is None:
+                fallback_plot_indices.append(k)
+        
+        if fallback_plot_indices:
+            for i, h5_path in enumerate(h5_paths_to_plot):
+                data = self.data_extractor.get_data(h5_path)[0]
+
+                for k in fallback_plot_indices:
+                    idxx = idxxs[k]
+                    idxy = idxys[k]
+
+                    if x_sources[k] is None:
+                        try:
+                            if idxx[0] == 'shot number':
+                                Xs[k, i] = i
+                            else:
+                                x_val = data.get(idxx) if isinstance(data, dict) else None
+                                Xs[k, i] = float(x_val) if x_val is not None else np.nan
+                        except Exception:
+                            Xs[k, i] = np.nan
+
+                    if y_sources[k] is None:
+                        try:
+                            if idxy[0] == 'shot number':
+                                Ys[k, i] = i
+                            else:
+                                y_val = data.get(idxy) if isinstance(data, dict) else None
+                                Ys[k, i] = float(y_val) if y_val is not None else np.nan
+                        except Exception:
+                            Ys[k, i] = np.nan
                     
         for k in range(self.nplots):
-            self.curves[k].setData(Xs[k], Ys[k])
+            # Remove NaN values for plotting to show only valid data points
+            valid_mask = ~(np.isnan(Xs[k]) | np.isnan(Ys[k]))
+            valid_xs = Xs[k][valid_mask]
+            valid_ys = Ys[k][valid_mask]
+            
+            # Check if the mean_error checkbox exists and is checked
+            if k < len(self.mean_error_cbs) and self.mean_error_cbs[k].isChecked():
+                # Calculate mean and error for this curve
+                mean_xs, mean_ys, std_errors = self.calculate_mean_and_error(valid_xs, valid_ys)
+                
+                if len(mean_xs) > 0:
+                    self.curves[k].setData(mean_xs, mean_ys)
+                    if k < len(self.error_bars):
+                        self.error_bars[k].setData(x=mean_xs, y=mean_ys, height=std_errors)
+                        self.error_bars[k].show()
+                else:
+                    self.curves[k].setData([], [])
+                    if k < len(self.error_bars):
+                        self.error_bars[k].hide()
+            else:
+                # Display raw data (only valid, non-NaN points)
+                self.curves[k].setData(valid_xs, valid_ys)
+                if k < len(self.error_bars):
+                    self.error_bars[k].hide()
 
 import h5py  
 from pandas.api.types import is_numeric_dtype
@@ -640,14 +1105,27 @@ class ArrayDataCombo(ExtendedCombo):
         self.update_model(h5_paths)
                 
     def update_model(self, h5_paths):
+        # Handle None or DataFrame-like h5_paths gracefully
+        if h5_paths is None:
+            h5_paths = []
+        elif hasattr(h5_paths, 'filepath'):
+            h5_paths = h5_paths.filepath.tolist()
+        
         results_array_labels = set([])
         for h5_path in h5_paths:
-            with h5py.File(h5_path, 'r') as h5_file:
-                analysis_names = h5_file['results'].keys()
-                
-                for analysis_name in analysis_names:
-                    for key in h5_file['results'][analysis_name].keys():
-                        results_array_labels.add(analysis_name+','+key)
+            try:
+                with h5py.File(h5_path, 'r') as h5_file:
+                    if 'results' not in h5_file:
+                        continue
+                    analysis_names = h5_file['results'].keys()
+                    
+                    for analysis_name in analysis_names:
+                        for key in h5_file['results'][analysis_name].keys():
+                            results_array_labels.add(analysis_name+','+key)
+            except Exception as e:
+                import logging
+                logging.debug(f"Could not read results from {h5_path}: {e}")
+                continue
             
         
         model = QStandardItemModel()
@@ -656,7 +1134,7 @@ class ArrayDataCombo(ExtendedCombo):
         model.setItem(0, 0, item)
         
         
-        for i, idx in enumerate(results_array_labels):
+        for i, idx in enumerate(results_array_labels, start=1):
             item = QStandardItem(idx)
             model.setItem(i, 0, item)
                 
@@ -732,6 +1210,17 @@ class QuickWaterfallPlot(QuickDataPlot):
         self.bt_update.clicked.connect(self.update_from_h5)
         self.table.setCellWidget(1, 1, self.bt_update)
         
+    
+    def update_combos(self, h5_paths):
+        """Update combo models when h5_paths/df change"""
+        try:
+            self.combox.update_model(self.ap.df)
+            self.comboy.update_model(h5_paths)
+            self.comboz.update_model(h5_paths)
+        except Exception as e:
+            import logging
+            logging.debug(f"Error updating combos: {e}")
+
     def update_data_extractor(self):
         
         idxx = self.combox.get_idx()
@@ -751,43 +1240,59 @@ class QuickWaterfallPlot(QuickDataPlot):
             self.data_extractor[idxz] = ArrayDataExtractor(idxz)
         
         self.data_extractor.clean_children([idxx, idxy, idxz])
-        self.data_extractor.clean_memory(self.ap.h5_paths)
+        self.clean_data_extractor_if_needed()
         
     def update(self, data = None):
-        xs = np.array([])
-        ys = np.array([])
-        zs = np.array([])
+        # Use lists instead of np.append which causes memory leaks
+        xs_list = []
+        ys_list = []
+        zs_list = []
         
         idxx = self.combox.get_idx()
         idxy = self.comboy.get_idx()
         idxz = self.comboz.get_idx()
         
-        for i, h5_path in enumerate(self.ap.h5_paths_selected):
+        # Use all h5_paths, not just selected ones
+        h5_paths = self.get_all_h5_paths()
+        
+        for i, h5_path in enumerate(h5_paths):
             
             data = self.data_extractor.get_data(h5_path)[0]
             
             
             if idxx[0] == 'shot number':
-                x = self.ap.shotselector.get_selected_indices()[0][i]
+                x = i
             else:
-                x = data[idxx]
+                x = data.get(idxx) if isinstance(data, dict) else None
             
-            y = data[idxy]
-            z = data[idxz]
+            y = data.get(idxy) if isinstance(data, dict) else None
+            z = data.get(idxz) if isinstance(data, dict) else None
             
+            if x is None or not isinstance(x, (int, float, np.number)):
+                continue
+                
             if y is not None and z is not None:
-                xs = np.append(xs , x * np.ones_like(y))
-                ys = np.append(ys , y)
-                zs = np.append(zs , z)
+                xs_list.extend(x * np.ones_like(y))
+                ys_list.extend(np.asarray(y).flat)
+                zs_list.extend(np.asarray(z).flat)
             elif y is not None:
-                xs = np.append(xs , x * np.ones_like(y))
-                ys = np.append(ys , y)
-                zs = np.append(zs , y*np.nan)
+                xs_list.extend(x * np.ones_like(y))
+                ys_list.extend(np.asarray(y).flat)
+                zs_list.extend(np.full_like(y, np.nan))
             elif z is not None:
-                xs = np.append(xs , x * np.ones_like(z))
-                ys = np.append(ys , z*np.nan)
-                zs = np.append(zs , z)
+                xs_list.extend(x * np.ones_like(z))
+                ys_list.extend(np.full_like(z, np.nan))
+                zs_list.extend(np.asarray(z).flat)
+        
+        # Convert lists to arrays after loop
+        xs = np.array(xs_list, dtype=float)
+        ys = np.array(ys_list, dtype=float)
+        zs = np.array(zs_list, dtype=float)
            
+        # Handle empty data
+        if len(xs) == 0 or len(ys) == 0 or len(zs) == 0:
+            return
+            
         # here we don't want to assume that the data is on a grid
         # this can happen if the parameters where changed between two sweeps
         xi = np.linspace(xs.min(), xs.max(), 200)
@@ -799,6 +1304,8 @@ class QuickWaterfallPlot(QuickDataPlot):
         
         Zi = griddata((xs,ys), zs, (Xi, Yi), 'nearest')
         
+        # Clear large intermediate data after interpolation
+        del xs, ys, zs, Xi, Yi
         
         
         
@@ -907,6 +1414,17 @@ class Quick2DPlot(QuickDataPlot):
         self.bt_update = QPushButton('Update', self)
         self.bt_update.clicked.connect(self.update_from_h5)
         self.table.setCellWidget(1, 1, self.bt_update)
+
+    def update_combos(self, h5_paths):
+        """Update numeric combo models when h5_paths/df change"""
+        try:
+            self.combox.update_model(self.ap.df)
+            self.comboy.update_model(self.ap.df)
+            self.comboz.update_model(self.ap.df)
+        except Exception as e:
+            import logging
+            logging.debug(f"Error updating Quick2DPlot combos: {e}")
+
     def update_data_extractor(self):
         
         idxx = self.combox.get_idx()
@@ -932,48 +1450,72 @@ class Quick2DPlot(QuickDataPlot):
                 self.data_extractor[idxz] = SingleDataExtractor(idxz)
                 
         self.data_extractor.clean_children([idxx, idxy, idxz])
-        self.data_extractor.clean_memory(self.ap.h5_paths)
+        self.clean_data_extractor_if_needed()
         
     def update(self, murks = None):
         
-        xs = np.array([])
-        ys = np.array([])
-        zs = np.array([])
+        # Use lists instead of np.append which causes memory leaks
+        xs_list = []
+        ys_list = []
+        zs_list = []
         
         idxx = self.combox.get_idx()
         idxy = self.comboy.get_idx()
         idxz = self.comboz.get_idx()
         
-        for i, h5_path in enumerate(self.ap.h5_paths_selected):
+        # Use all h5_paths, not just selected ones
+        h5_paths = self.get_all_h5_paths()
+        
+        for i, h5_path in enumerate(h5_paths):
             
             data = self.data_extractor.get_data(h5_path)[0]
             if idxx[0] == 'shot number':
-                xs = np.append(xs, self.ap.shotselector.get_selected_indices()[0][i])
+                x_val = i
             else:
-                xs = np.append(xs, data[idxx])
-                
+                x_val = data.get(idxx) if isinstance(data, dict) else None
+            
             if idxy[0] == 'shot number':
-                ys = np.append(ys, self.ap.shotselector.get_selected_indices()[0][i])
+                y_val = i
             else:
-                ys = np.append(ys, data[idxy])
-                
+                y_val = data.get(idxy) if isinstance(data, dict) else None
+            
             if idxz[0] == 'shot number':
-                zs = np.append(zs, self.ap.shotselector.get_selected_indices()[0][i])
+                z_val = i
             else:
-                zs = np.append(zs, data[idxz])
+                z_val = data.get(idxz) if isinstance(data, dict) else None
+            
+            xs_list.append(x_val if x_val is not None else np.nan)
+            ys_list.append(y_val if y_val is not None else np.nan)
+            zs_list.append(z_val if z_val is not None else np.nan)
         
+        # Convert lists to arrays after loop
+        xs = np.array(xs_list, dtype=float)
+        ys = np.array(ys_list, dtype=float)
+        zs = np.array(zs_list, dtype=float)
+        
+        # Remove NaN values
+        valid_mask = ~(np.isnan(xs) | np.isnan(ys) | np.isnan(zs))
+        xs_valid = xs[valid_mask]
+        ys_valid = ys[valid_mask]
+        zs_valid = zs[valid_mask]
+        
+        if len(xs_valid) == 0 or len(ys_valid) == 0 or len(zs_valid) == 0:
+            return
         
         # here we don't want to assume that the data is on a grid
         # this can happen if the parameters where changed between two sweeps
         
-        xi = np.linspace(xs.min(), xs.max(), 200)
-        yi = np.linspace(ys.min(), ys.max(), 200)
+        xi = np.linspace(xs_valid.min(), xs_valid.max(), 200)
+        yi = np.linspace(ys_valid.min(), ys_valid.max(), 200)
         
         Xi, Yi = np.meshgrid(xi, yi)
         
         from scipy.interpolate import griddata
         
-        Zi = griddata((xs,ys), zs, (Xi, Yi), 'nearest')
+        Zi = griddata((xs_valid, ys_valid), zs_valid, (Xi, Yi), 'nearest')
+        
+        # Clear large intermediate data after interpolation
+        del xs_valid, ys_valid, zs_valid, Xi, Yi
         
         self.img.setImage(Zi.T)
         self.iso.setData(Zi.T)  

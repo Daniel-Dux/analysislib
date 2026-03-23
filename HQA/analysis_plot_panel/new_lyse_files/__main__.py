@@ -156,6 +156,16 @@ class WebServer(ZMQServer):
         logger.info('WebServer request: %s' % str(request_data))
         if request_data == 'hello':
             return 'hello'
+        elif request_data == 'clear shots':
+            def clear_shots():
+                table_view = app.filebox.ui.tableView
+                shots_model = app.filebox.shots_model
+                table_view.selectAll()
+                shots_model.remove_selection(confirm=False)
+                table_view.clearSelection()
+
+            QtCore.QTimer.singleShot(0, clear_shots)
+            return 'clearing shots'
         elif request_data == 'get dataframe':
             # infer_objects() picks fixed datatypes for columns that are compatible with
             # fixed datatypes, dramatically speeding up pickling. It is called here
@@ -189,7 +199,7 @@ class WebServer(ZMQServer):
             return "Experiment added successfully\n"
 
         return ("error: operation not supported. Recognised requests are:\n "
-                "'get dataframe'\n 'hello'\n {'filepath': <some_h5_filepath>}")
+            "'get dataframe'\n 'get h5_paths'\n 'clear shots'\n 'hello'\n {'filepath': <some_h5_filepath>}")
 
 
 class LyseMainWindow(QtWidgets.QMainWindow):

@@ -1,0 +1,14 @@
+{
+  "camera_name": "MOT_Counting",
+  "orientation": "PoC6",
+  "label": "MOT_Counting",
+  "image_name": "frame",
+  "shape": [
+    250,
+    224
+  ],
+  "mean": 2141.3902857142857,
+  "std": 434.02547485132527,
+  "recorded_from": "C:\\Experiments\\HQA\\hqa_sequence\\2026\\03\\23\\0016\\2026-03-23_0016_hqa_sequence_0_rep00044.h5",
+  "timestamp": "1774258808.4080915"
+}

@@ -9,7 +9,7 @@ import numpy as np
 import pyqtgraph as pg
 
 from pyqtgraph.Qt import QtCore, QtGui
-from PyQt5.QtWidgets import QCheckBox, QLabel
+from PyQt5.QtWidgets import QCheckBox, QLabel, QPushButton, QDoubleSpinBox, QHBoxLayout, QWidget, QGridLayout
 
 from __init__ import AnalysisPlot, color_palette
 
@@ -81,7 +81,11 @@ class ImagingPlot(AnalysisPlot):
         
         self.table.setMinimumHeight(85)
 
-        
+        self.bt_auto_levels = QPushButton('Auto Levels', self)
+        self.bt_auto_levels.clicked.connect(self.auto_levels)
+        self.desciption.nextRow()
+        self.desciption.addWidget(self.bt_auto_levels)
+
         # self.img.translate(-0.5, -0.5)
         
         self.scalex = 1
@@ -90,11 +94,16 @@ class ImagingPlot(AnalysisPlot):
         self.cx = 0
         self.cy = 0
     
-     
+    def auto_levels(self):
+        if hasattr(self, 'data_img') and self.data_img is not None:
+            lo = float(np.nanmin(self.data_img))
+            hi = float(np.nanmax(self.data_img))
+            self.hist.setLevels(lo, hi)
+
     def update(self, data_img, datax, datay, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning):
         
         #update plots
-        self.img.setImage(data_img.T)
+        self.img.setImage(data_img.T, autoLevels=False)
         self.iso.setData(data_img.T)        
         
         self.data_img = data_img
@@ -291,36 +300,126 @@ class TracePlot(AnalysisPlot):
 
         self.setMinimumHeight(200)
         self.setMinimumWidth(400)
-        
-        self.plot = self.plots.addPlot()
-        
-        self.trace = self.plot.plot(pen=pg.mkPen(style=QtCore.Qt.DashLine,width=2, color = color_palette[1], ))
 
-        self.plot.setLabel('bottom', 'times', units = 's')
-        self.plot.setLabel('left', 'volts', units = 'mV')
-        
-        
-        
-    def update(self,volts, times, tabledata, sig_type, warning): 
-        #update_plot        
-        # print(type(volts))
-        volts_=np.array([])
-        if sig_type == 'fft' :
-            self.plot.setLabel('bottom', 'freqs', units = 'Hz')
-            self.plot.setLabel('left', 'Magnitude', units = 'dB')
-            # self.plot.setLogMode(False,True)
-            volts = 10*np.log(volts)
-            
-        elif sig_type == 'trace' :
-            self.plot.setLabel('bottom', 'times', units = 's')
-            self.plot.setLabel('left', 'volts', units = 'V')
-            self.plot.setLogMode(False,False)
-            volts = volts/1e3
-        
+        # --- trace plot ---
+        self.plot = self.plots.addPlot()
+        self.trace = self.plot.plot(pen=pg.mkPen(style=QtCore.Qt.DashLine, width=2, color=color_palette[1]))
+        self.plot.setLabel('bottom', 'times', units='s')
+        self.plot.setLabel('left', 'volts', units='mV')
+
+        # --- FFT plot (hidden until toggled on) ---
+        self.plots.nextRow()
+        self.fft_plot = self.plots.addPlot()
+        self.fft_curve = self.fft_plot.plot(pen=pg.mkPen(width=1.5, color=color_palette[0]))
+        self.fft_plot.setLabel('bottom', 'Frequency', units='Hz')
+        self.fft_plot.setLabel('left', 'Magnitude', units='dB')
+        self.fft_plot.hide()
+
+        # --- FFT controls bar ---
+        self._fft_ctrl = QWidget()
+        ctrl_layout = QHBoxLayout(self._fft_ctrl)
+        ctrl_layout.setContentsMargins(4, 2, 4, 2)
+        ctrl_layout.setSpacing(6)
+
+        self._cb_fft = QCheckBox('FFT')
+        self._cb_fft.setChecked(False)
+        self._cb_fft.stateChanged.connect(self._on_fft_toggled)
+        ctrl_layout.addWidget(self._cb_fft)
+
+        ctrl_layout.addWidget(QLabel('t start (s):'))
+        self._sb_t0 = QDoubleSpinBox()
+        self._sb_t0.setDecimals(4)
+        self._sb_t0.setMinimum(-1e9)
+        self._sb_t0.setMaximum(1e9)
+        self._sb_t0.setSingleStep(0.001)
+        self._sb_t0.setValue(0.0)
+        self._sb_t0.valueChanged.connect(self._recompute_fft)
+        ctrl_layout.addWidget(self._sb_t0)
+
+        ctrl_layout.addWidget(QLabel('t end (s):'))
+        self._sb_t1 = QDoubleSpinBox()
+        self._sb_t1.setDecimals(4)
+        self._sb_t1.setMinimum(-1e9)
+        self._sb_t1.setMaximum(1e9)
+        self._sb_t1.setSingleStep(0.001)
+        self._sb_t1.setValue(1.0)
+        self._sb_t1.valueChanged.connect(self._recompute_fft)
+        ctrl_layout.addWidget(self._sb_t1)
+
+        ctrl_layout.addStretch()
+        self.desciption.nextRow()
+        self.desciption.addWidget(self._fft_ctrl)
+
+        # raw data cache for recompute on range change
+        self._raw_times = None
+        self._raw_volts = None
+
+    def _on_fft_toggled(self, state):
+        if state:
+            self.fft_plot.show()
+        else:
+            self.fft_plot.hide()
+        self._recompute_fft()
+
+    def _recompute_fft(self):
+        if not self._cb_fft.isChecked():
+            return
+        if self._raw_times is None or self._raw_volts is None:
+            return
+
+        t0 = self._sb_t0.value()
+        t1 = self._sb_t1.value()
+        if t1 <= t0:
+            return
+
+        mask = (self._raw_times >= t0) & (self._raw_times <= t1)
+        t_sel = self._raw_times[mask]
+        v_sel = self._raw_volts[mask]
+
+        if len(v_sel) < 4:
+            return
+
+        # assume uniform sampling; use median dt for robustness
+        dt = float(np.median(np.diff(t_sel)))
+        if dt <= 0:
+            return
+
+        n = len(v_sel)
+        freqs = np.fft.rfftfreq(n, d=dt)
+        spectrum = np.abs(np.fft.rfft(v_sel - v_sel.mean()))
+        # convert to dB, guard against zero
+        spectrum_db = 20.0 * np.log10(np.maximum(spectrum, 1e-30))
+
+        self.fft_curve.setData(freqs, spectrum_db)
+
+    def update(self, volts, times, tabledata, sig_type, warning):
+        if sig_type == 'fft':
+            self.plot.setLabel('bottom', 'freqs', units='Hz')
+            self.plot.setLabel('left', 'Magnitude', units='dB')
+            volts = 10 * np.log(volts)
+        elif sig_type == 'trace':
+            self.plot.setLabel('bottom', 'times', units='s')
+            self.plot.setLabel('left', 'volts', units='V')
+            self.plot.setLogMode(False, False)
+            volts = volts / 1e3
+
         self.trace.setData(times, volts)
-        
-        
-        #update table and warning
+
+        # cache for FFT recompute
+        self._raw_times = np.asarray(times, dtype=float)
+        self._raw_volts = np.asarray(volts, dtype=float)
+
+        # auto-set spin box range to data extent on first update
+        if len(times):
+            t_min = float(times[0])
+            t_max = float(times[-1])
+            # only snap range if spin boxes still hold default or out-of-data values
+            if self._sb_t0.value() == 0.0 and self._sb_t1.value() == 1.0:
+                self._sb_t0.setValue(t_min)
+                self._sb_t1.setValue(t_max)
+
+        self._recompute_fft()
+
         self.table.setData(tabledata)
         self.update_warning(warning)
 
@@ -352,11 +451,23 @@ class FluoBackgroundPlot(AnalysisPlot):
         self.ax_corrected.addItem(self.bg_roi_rect)
         
         self.table.setMinimumHeight(100)
+
+        self.bt_auto_levels = QPushButton('Auto Levels', self)
+        self.bt_auto_levels.clicked.connect(self.auto_levels)
+        self.desciption.nextRow()
+        self.desciption.addWidget(self.bt_auto_levels)
     
+    def auto_levels(self):
+        if hasattr(self, '_last_corrected_image') and self._last_corrected_image is not None:
+            lo = float(np.nanmin(self._last_corrected_image))
+            hi = float(np.nanmax(self._last_corrected_image))
+            self.hist_corrected.setLevels(lo, hi)
+
     def update(self, corrected_image, background_avg, tabledata, warning, roi_data=None):
         
         # Update corrected image
-        self.img_corrected.setImage(corrected_image.T)
+        self._last_corrected_image = corrected_image
+        self.img_corrected.setImage(corrected_image.T, autoLevels=False)
         
         # Update ROI positions if available
         if roi_data is not None:
@@ -380,53 +491,205 @@ class ADwinTracesPlot(AnalysisPlot):
     
     def __init__(self, title, max_channels=8, **kwargs):
         super().__init__(title, **kwargs)
-        
+
         self.setMinimumHeight(400)
         self.setMinimumWidth(600)
         self.max_channels = max_channels
-        
-        # Add channel selector at the top - insert before plots
+
         self.channel_selector_widget = None
-        self.channel_selector_label = None
         self.channel_checkboxes = {}
         self.all_channel_names = []
-        
-        # Pre-allocate grid of plots
-        num_cols = 2
-        num_rows = (max_channels + num_cols - 1) // num_cols
-        
-        self.plot_items = {}
-        self.curves_dict = {}
-        self.channel_names = []
+        self._fft_channel_checkboxes = {}
+
+        # Plot item dicts – populated dynamically by _rebuild_layout
+        self.plot_items = {}      # idx -> {plot, curve, channel_name, times, values}
+        self.fft_plot_items = {}  # idx -> {plot, curve, channel_name}
+
         self.target_visible_points = 3000
         self.max_points_overview = 5000
         self._is_refreshing_curves = False
-        
-        # Create all plots upfront in a grid
-        for i in range(max_channels):
-            row = i // num_cols
-            col = i % num_cols
-            plot = self.plots.addPlot(row=row, col=col)
-            plot.setLabel('bottom', 'Time', units='s')
-            plot.setLabel('left', 'Voltage', units='V')
-            plot.showGrid(True, True, alpha=0.3)
-            plot.hideAxis('left')
-            plot.hideAxis('bottom')
-            plot.vb.sigXRangeChanged.connect(self.on_plot_xrange_changed)
-            self.plot_items[i] = {
-                'plot': plot,
-                'curve': None,
-                'channel_name': None,
-                'times': None,
-                'values': None,
-            }
-        
+
         self.table.setMinimumHeight(100)
-        
-        # Store all traces data for re-rendering when selection changes
+
         self.current_traces_dict = {}
         self.current_tabledata = np.array([], dtype=[])
         self.current_warning = ""
+
+        # Spinboxes for FFT time window – embedded in the channel-selector widget
+        self._sb_t0 = QDoubleSpinBox()
+        self._sb_t0.setDecimals(4)
+        self._sb_t0.setMinimum(-1e9)
+        self._sb_t0.setMaximum(1e9)
+        self._sb_t0.setSingleStep(0.001)
+        self._sb_t0.setValue(0.0)
+        self._sb_t0.valueChanged.connect(self._recompute_fft)
+
+        self._sb_t1 = QDoubleSpinBox()
+        self._sb_t1.setDecimals(4)
+        self._sb_t1.setMinimum(-1e9)
+        self._sb_t1.setMaximum(1e9)
+        self._sb_t1.setSingleStep(0.001)
+        self._sb_t1.setValue(1.0)
+        self._sb_t1.valueChanged.connect(self._recompute_fft)
+
+        # Link-X checkbox (re-parented into the channel selector widget each rebuild)
+        self._cb_link_x = QCheckBox('Lock time axes')
+        self._cb_link_x.setChecked(False)
+        self._cb_link_x.stateChanged.connect(self._apply_x_link)
+
+    # ------------------------------------------------------------------
+    # FFT helpers
+    # ------------------------------------------------------------------
+
+    def _any_fft_active(self):
+        return any(cb.isChecked() for cb in self._fft_channel_checkboxes.values())
+
+    def _get_fft_channels(self):
+        """Return channels whose FFT checkbox is checked."""
+        return [ch for ch, cb in self._fft_channel_checkboxes.items() if cb.isChecked()]
+
+    def _on_fft_checkbox_changed(self):
+        """Rebuild layout whenever an FFT checkbox is toggled."""
+        self._rebuild_layout()
+
+    def _rebuild_layout(self):
+        """Destroy and recreate all plot items to reflect current show/FFT state."""
+        # Disconnect zoom signals before clearing
+        for item in self.plot_items.values():
+            try:
+                item['plot'].vb.sigXRangeChanged.disconnect(self.on_plot_xrange_changed)
+            except Exception:
+                pass
+        self.plot_items.clear()
+        self.fft_plot_items.clear()
+        self.plots.clear()
+
+        selected = set(self.get_selected_channels())
+        fft_active = self._any_fft_active()
+        fft_channels = set(self._get_fft_channels())
+        shown = [ch for ch in self.all_channel_names if ch in selected]
+
+        if not fft_active:
+            # Two trace columns, no FFT column
+            for i, ch in enumerate(shown):
+                if i >= self.max_channels:
+                    break
+                row = i // 2
+                col = i % 2
+                plot = self.plots.addPlot(row=row, col=col)
+                plot.setTitle(ch)
+                plot.setLabel('bottom', 'Time', units='s')
+                plot.setLabel('left', 'Voltage', units='V')
+                plot.showGrid(True, True, alpha=0.3)
+                plot.vb.sigXRangeChanged.connect(self.on_plot_xrange_changed)
+                self.plot_items[i] = {
+                    'plot': plot, 'curve': None,
+                    'channel_name': ch, 'times': None, 'values': None,
+                }
+        else:
+            # Left column: time traces; right column: FFT (only FFT-checked channels)
+            for i, ch in enumerate(shown):
+                if i >= self.max_channels:
+                    break
+                plot = self.plots.addPlot(row=i, col=0)
+                plot.setTitle(ch)
+                plot.setLabel('bottom', 'Time', units='s')
+                plot.setLabel('left', 'Voltage', units='V')
+                plot.showGrid(True, True, alpha=0.3)
+                plot.vb.sigXRangeChanged.connect(self.on_plot_xrange_changed)
+                self.plot_items[i] = {
+                    'plot': plot, 'curve': None,
+                    'channel_name': ch, 'times': None, 'values': None,
+                }
+                if ch in fft_channels:
+                    fft_plot = self.plots.addPlot(row=i, col=1)
+                    fft_plot.setLabel('bottom', 'Frequency', units='Hz')
+                    fft_plot.setLabel('left', 'Power', units='dBm')
+                    fft_plot.showGrid(True, True, alpha=0.3)
+                    fft_plot.setTitle(f'{ch} FFT')
+                    fft_curve = fft_plot.plot(
+                        pen=pg.mkPen(color=color_palette[i % len(color_palette)], width=1.5))
+                    self.fft_plot_items[i] = {
+                        'plot': fft_plot, 'curve': fft_curve, 'channel_name': ch,
+                    }
+
+        self._apply_x_link()
+        self._fill_trace_data()
+        self._recompute_fft()
+
+    def _apply_x_link(self):
+        """Link or unlink X axes of all trace plots depending on the checkbox state."""
+        plots = [item['plot'] for item in self.plot_items.values()]
+        if not plots:
+            return
+        if hasattr(self, '_cb_link_x') and self._cb_link_x.isChecked():
+            ref_vb = plots[0].vb
+            for p in plots[1:]:
+                p.setXLink(plots[0])
+        else:
+            for p in plots:
+                p.setXLink(None)
+
+    def _fill_trace_data(self):
+        """Fill current trace data into existing plot_items."""
+        if not self.current_traces_dict:
+            return
+        for idx, plot_item in self.plot_items.items():
+            ch = plot_item['channel_name']
+            if ch is None or ch not in self.current_traces_dict:
+                continue
+            times, values = self.current_traces_dict[ch]
+            times  = np.asarray(times,  dtype=float)
+            values = np.asarray(values, dtype=float)
+            if plot_item['curve'] is not None:
+                plot_item['plot'].removeItem(plot_item['curve'])
+            x_range = plot_item['plot'].vb.viewRange()[0]
+            times_plot, values_plot = self._prepare_plot_data(times, values, x_range=x_range)
+            if not len(times_plot):
+                times_plot, values_plot = self._prepare_plot_data(times, values, x_range=None)
+            curve = plot_item['plot'].plot(
+                times_plot, values_plot,
+                pen=pg.mkPen(color=color_palette[idx % len(color_palette)], width=1.5))
+            plot_item['curve'] = curve
+            plot_item['times'] = times
+            plot_item['values'] = values
+
+    def _recompute_fft(self):
+        """Compute and display dBm FFT for all active fft_plot_items."""
+        if not self.fft_plot_items or not self.current_traces_dict:
+            return
+        t0 = self._sb_t0.value()
+        t1 = self._sb_t1.value()
+        if t1 <= t0:
+            return
+        for fft_item in self.fft_plot_items.values():
+            ch = fft_item['channel_name']
+            if ch is None or ch not in self.current_traces_dict:
+                fft_item['curve'].setData([], [])
+                continue
+            times, values = self.current_traces_dict[ch]
+            times  = np.asarray(times,  dtype=float)
+            values = np.asarray(values, dtype=float)
+            mask  = (times >= t0) & (times <= t1)
+            t_sel = times[mask]
+            v_sel = values[mask]
+            if len(v_sel) < 4:
+                fft_item['curve'].setData([], [])
+                continue
+            dt = float(np.median(np.diff(t_sel)))
+            if dt <= 0:
+                continue
+            n     = len(v_sel)
+            freqs = np.fft.rfftfreq(n, d=dt)
+            # One-sided peak amplitude spectrum (Volts)
+            amp = np.abs(np.fft.rfft(v_sel - v_sel.mean())) * 2.0 / n
+            amp[0] /= 2.0             # DC bin: no doubling
+            if n % 2 == 0:
+                amp[-1] /= 2.0        # Nyquist bin: no doubling
+            # dBm = 10·log10(Vrms² / (R·1mW)),  R = 50 Ω, Vrms = amp/sqrt(2)
+            R   = 50.0
+            dbm = 10.0 * np.log10(np.maximum(amp**2 / (2.0 * R * 1e-3), 1e-30))
+            fft_item['curve'].setData(freqs, dbm)
 
     def _prepare_plot_data(self, times, values, x_range=None):
         """Prepare plot data with adaptive downsampling.
@@ -492,130 +755,105 @@ class ADwinTracesPlot(AnalysisPlot):
             self._is_refreshing_curves = False
     
     def update_channel_selector(self, all_channels):
-        """Update the channel selector checkboxes based on available channels"""
+        """Rebuild the channel selector widget with Show + FFT checkboxes and time spinboxes."""
         # Clear existing checkboxes
         for cb in self.channel_checkboxes.values():
-            cb.hide()
-            cb.setParent(None)
-            cb.deleteLater()
+            cb.hide(); cb.setParent(None); cb.deleteLater()
         self.channel_checkboxes.clear()
-        
-        # Remove old widget if it exists
+        for cb in self._fft_channel_checkboxes.values():
+            cb.hide(); cb.setParent(None); cb.deleteLater()
+        self._fft_channel_checkboxes.clear()
+
+        # Detach spinboxes before the old widget is deleted
+        self._sb_t0.setParent(None)
+        self._sb_t1.setParent(None)
+        self._cb_link_x.setParent(None)
+
         if self.channel_selector_widget is not None:
-            # Find and remove the widget from the splitter
             for i in range(self.count()):
                 if self.widget(i) == self.channel_selector_widget:
                     self.widget(i).setParent(None)
                     break
             self.channel_selector_widget.deleteLater()
-        
-        # Create new selector widget
-        self.channel_selector_widget = pg.LayoutWidget()
-        self.channel_selector_label = QLabel("Show channels:")
-        self.channel_selector_widget.addWidget(self.channel_selector_label)
-        
-        # Create new checkboxes for each channel
+
+        # Grid layout:
+        #   Row 0: "Channel"      | ch1       | ch2 | ...
+        #   Row 1: "Show"         | cb        | cb  | ...
+        #   Row 2: "FFT"          | cb        | cb  | ...
+        #   Row 3: "FFT t0 (s):"  | [spinbox spanning all channel cols]
+        #   Row 4: "FFT t1 (s):"  | [spinbox spanning all channel cols]
+        self.channel_selector_widget = QWidget()
+        grid = QGridLayout(self.channel_selector_widget)
+        grid.setContentsMargins(4, 2, 4, 2)
+        grid.setSpacing(4)
+
+        grid.addWidget(QLabel('<b>Channel</b>'), 0, 0)
+        grid.addWidget(QLabel('<b>Show</b>'),    1, 0)
+        grid.addWidget(QLabel('<b>FFT</b>'),     2, 0)
+
         self.all_channel_names = sorted(all_channels)
-        for channel_name in self.all_channel_names:
-            cb = QCheckBox(channel_name)
-            cb.setChecked(True)  # All channels selected by default
-            cb.stateChanged.connect(self.on_channel_selection_changed)
-            self.channel_checkboxes[channel_name] = cb
-            self.channel_selector_widget.addWidget(cb)
-        
-        # Insert the new widget at position 0 (top of splitter)
+        n_ch = len(self.all_channel_names)
+        for col_idx, channel_name in enumerate(self.all_channel_names, start=1):
+            grid.addWidget(QLabel(channel_name), 0, col_idx)
+
+            show_cb = QCheckBox()
+            show_cb.setChecked(True)
+            show_cb.stateChanged.connect(self.on_channel_selection_changed)
+            self.channel_checkboxes[channel_name] = show_cb
+            grid.addWidget(show_cb, 1, col_idx)
+
+            fft_cb = QCheckBox()
+            fft_cb.setChecked(False)
+            fft_cb.stateChanged.connect(self._on_fft_checkbox_changed)
+            self._fft_channel_checkboxes[channel_name] = fft_cb
+            grid.addWidget(fft_cb, 2, col_idx)
+
+        # Time-range spinboxes spanning all channel columns
+        span = max(n_ch, 1)
+        grid.addWidget(QLabel('FFT t0 (s):'), 3, 0)
+        grid.addWidget(self._sb_t0, 3, 1, 1, span)
+        grid.addWidget(QLabel('FFT t1 (s):'), 4, 0)
+        grid.addWidget(self._sb_t1, 4, 1, 1, span)
+        grid.addWidget(self._cb_link_x, 5, 0, 1, span + 1)
+
         self.insertWidget(0, self.channel_selector_widget)
     
     def on_channel_selection_changed(self):
-        """Called when user checks/unchecks a channel"""
-        # Re-render with current selection
-        self.render_selected_channels()
-    
-    def get_selected_channels(self):
-        """Get list of currently selected channel names"""
-        return [name for name, cb in self.channel_checkboxes.items() if cb.isChecked()]
-    
-    def render_selected_channels(self):
-        """Render only the selected channels"""
-        selected = self.get_selected_channels()
-        
-        # Filter traces_dict to only selected channels
-        filtered_traces = {name: data for name, data in self.current_traces_dict.items() if name in selected}
-        
-        # Reset all plots
-        for i in self.plot_items.values():
-            plot = i['plot']
-            if i['curve'] is not None:
-                plot.removeItem(i['curve'])
-            i['curve'] = None
-            i['channel_name'] = None
-            i['times'] = None
-            i['values'] = None
-            plot.setTitle('')
-            plot.hideAxis('left')
-            plot.hideAxis('bottom')
-        
-        if not filtered_traces:
-            self.update_warning(self.current_warning or "No traces selected")
-            return
-        
-        # Populate plots with selected data
-        for idx, (channel_name, (times, values)) in enumerate(sorted(filtered_traces.items())):
-            if idx >= self.max_channels:
-                break
-            
-            plot_item = self.plot_items[idx]
-            plot = plot_item['plot']
-            
-            # Show axes
-            plot.showAxis('left')
-            plot.showAxis('bottom')
-            
-            # Set title
-            plot.setTitle(channel_name)
+        """Called when a Show checkbox is toggled."""
+        self._rebuild_layout()
 
-            # Store full-resolution data and render with adaptive visible-range downsampling
-            plot_item['times'] = times
-            plot_item['values'] = values
-            x_range = plot.vb.viewRange()[0]
-            times_plot, values_plot = self._prepare_plot_data(times, values, x_range=x_range)
-            if not len(times_plot):
-                times_plot, values_plot = self._prepare_plot_data(times, values, x_range=None)
-            
-            # Create new curve
-            curve = plot.plot(times_plot, values_plot, 
-                            pen=pg.mkPen(color=color_palette[idx % len(color_palette)], width=1.5))
-            plot_item['curve'] = curve
-            plot_item['channel_name'] = channel_name
-    
+    def get_selected_channels(self):
+        """Get list of currently selected channel names."""
+        return [name for name, cb in self.channel_checkboxes.items() if cb.isChecked()]
+
+    def render_selected_channels(self):
+        """Repopulate plots with current data (no layout rebuild)."""
+        self._fill_trace_data()
+        self._recompute_fft()
+
     def update(self, traces_dict, tabledata, warning):
-        """
-        Update the plot with ADwin trace data.
-        
-        Parameters
-        ----------
-        traces_dict : dict
-            Dictionary mapping channel names to (times, values) tuples
-        tabledata : numpy.ndarray
-            Table data to display
-        warning : str
-            Warning message if any
-        """
-        
-        # Store current data
         self.current_traces_dict = traces_dict
         self.current_tabledata = tabledata
         self.current_warning = warning
-        
-        # Update channel selector if channels changed
-        if set(traces_dict.keys()) != set(self.all_channel_names):
+
+        channels_changed = set(traces_dict.keys()) != set(self.all_channel_names)
+        if channels_changed:
             self.update_channel_selector(traces_dict.keys())
-        
-        # Render with current selection
-        self.render_selected_channels()
-        
-        # Update table and warning
+            self._rebuild_layout()
+        else:
+            self._fill_trace_data()
+            self._recompute_fft()
+
+        # Snap spinbox range to data extent on first meaningful update
+        if traces_dict:
+            all_times = [np.asarray(t, dtype=float) for t, _v in traces_dict.values()
+                         if t is not None and len(t)]
+            if all_times:
+                t_min = float(min(t[0] for t in all_times))
+                t_max = float(max(t[-1] for t in all_times))
+                if self._sb_t0.value() == 0.0 and self._sb_t1.value() == 1.0:
+                    self._sb_t0.setValue(t_min)
+                    self._sb_t1.setValue(t_max)
+
         self.table.setData(tabledata)
         self.update_warning(warning)
-
-        

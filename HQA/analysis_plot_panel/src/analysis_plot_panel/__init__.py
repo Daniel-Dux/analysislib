@@ -759,6 +759,7 @@ class Quick1DPlot(QuickDataPlot):
         self.combos = []
         self.curves = []
         self.error_bars = []
+        self.std_bars = []
         self.show_cbs = []
         self.scatter_cbs = []
         self.mean_error_cbs = []
@@ -800,10 +801,16 @@ class Quick1DPlot(QuickDataPlot):
         
         self.curves += [self.plot.plot(pen=pg.mkPen(color = color_palette[self.nplots - 1], width = 1.5), symbol ='o', symbolPen = None, symbolBrush = None)]
         
-        # Add ErrorBarItem for each curve
-        error_bar = pg.ErrorBarItem(pen=pg.mkPen(color=color_palette[self.nplots - 1], width=1.5))
+        # Add ErrorBarItem for each curve (std/sqrt(n) — error of the mean)
+        error_bar = pg.ErrorBarItem(pen=pg.mkPen(color=color_palette[self.nplots - 1], width=4))
         self.plot.addItem(error_bar)
         self.error_bars += [error_bar]
+
+        # Add ErrorBarItem for stddev (fluctuations), shown lighter
+        c = color_palette[self.nplots - 1]
+        std_bar = pg.ErrorBarItem(pen=pg.mkPen(color=(*c[:3], 90), width=2))
+        self.plot.addItem(std_bar)
+        self.std_bars += [std_bar]
         
         self.show_cbs += [QCheckBox()]
         self.show_cbs[self.nplots - 1].setChecked(True)
@@ -869,13 +876,19 @@ class Quick1DPlot(QuickDataPlot):
                 self.curves[k].setSymbolBrush(brush)
                 self.curves[k].setPen(None)
                 self.error_bars[k].hide()
+                if k < len(self.std_bars):
+                    self.std_bars[k].hide()
             else:
                 self.curves[k].setSymbolBrush(None and self.show_cbs[k].isChecked())
                 self.curves[k].setPen(pen)
                 if self.mean_error_cbs[k].isChecked():
                     self.error_bars[k].show()
+                    if k < len(self.std_bars):
+                        self.std_bars[k].show()
                 else:
                     self.error_bars[k].hide()
+                    if k < len(self.std_bars):
+                        self.std_bars[k].hide()
 
         
     def update_data_extractor(self):
@@ -963,7 +976,7 @@ class Quick1DPlot(QuickDataPlot):
     
     def calculate_mean_and_error(self, xs, ys):
         """
-        Group data by x-values and calculate mean and standard error.
+        Group data by x-values and calculate mean, standard error, and stddev.
         
         Parameters
         ----------
@@ -979,7 +992,9 @@ class Quick1DPlot(QuickDataPlot):
         mean_ys : numpy.ndarray
             Mean y-value for each x-value
         std_errors : numpy.ndarray
-            Standard error for each x-value
+            Standard error (stddev/sqrt(n)) for each x-value
+        stddevs : numpy.ndarray
+            Standard deviation for each x-value
         """
         # Remove NaN values
         valid_mask = ~(np.isnan(xs) | np.isnan(ys))
@@ -987,7 +1002,7 @@ class Quick1DPlot(QuickDataPlot):
         ys_clean = ys[valid_mask]
         
         if len(xs_clean) == 0:
-            return np.array([]), np.array([]), np.array([])
+            return np.array([]), np.array([]), np.array([]), np.array([])
         
         # Sort by x-values
         sorted_indices = np.argsort(xs_clean)
@@ -998,14 +1013,20 @@ class Quick1DPlot(QuickDataPlot):
         unique_xs = np.unique(xs_sorted)
         mean_ys = np.zeros_like(unique_xs)
         std_errors = np.zeros_like(unique_xs)
+        stddevs = np.zeros_like(unique_xs)
         
-        # Calculate mean and std error for each unique x-value
+        # Calculate mean, stddev and std error for each unique x-value
         for i, x_val in enumerate(unique_xs):
             y_values = ys_sorted[xs_sorted == x_val]
             mean_ys[i] = np.mean(y_values)
-            std_errors[i] = np.std(y_values) / np.sqrt(len(y_values)) if len(y_values) > 1 else 0
+            if len(y_values) > 1:
+                stddevs[i] = np.std(y_values)
+                std_errors[i] = stddevs[i] / np.sqrt(len(y_values))
+            else:
+                stddevs[i] = 0
+                std_errors[i] = 0
         
-        return unique_xs, mean_ys, std_errors
+        return unique_xs, mean_ys, std_errors, stddevs
         
     def update(self, data = None):
         
@@ -1080,22 +1101,29 @@ class Quick1DPlot(QuickDataPlot):
             # Check if the mean_error checkbox exists and is checked
             if k < len(self.mean_error_cbs) and self.mean_error_cbs[k].isChecked():
                 # Calculate mean and error for this curve
-                mean_xs, mean_ys, std_errors = self.calculate_mean_and_error(valid_xs, valid_ys)
+                mean_xs, mean_ys, std_errors, stddevs = self.calculate_mean_and_error(valid_xs, valid_ys)
                 
                 if len(mean_xs) > 0:
                     self.curves[k].setData(mean_xs, mean_ys)
                     if k < len(self.error_bars):
-                        self.error_bars[k].setData(x=mean_xs, y=mean_ys, height=std_errors)
+                        self.error_bars[k].setData(x=mean_xs, y=mean_ys, height=2 * std_errors)
                         self.error_bars[k].show()
+                    if k < len(self.std_bars):
+                        self.std_bars[k].setData(x=mean_xs, y=mean_ys, height=2 * stddevs)
+                        self.std_bars[k].show()
                 else:
                     self.curves[k].setData([], [])
                     if k < len(self.error_bars):
                         self.error_bars[k].hide()
+                    if k < len(self.std_bars):
+                        self.std_bars[k].hide()
             else:
                 # Display raw data (only valid, non-NaN points)
                 self.curves[k].setData(valid_xs, valid_ys)
                 if k < len(self.error_bars):
                     self.error_bars[k].hide()
+                if k < len(self.std_bars):
+                    self.std_bars[k].hide()
 
 import h5py  
 from pandas.api.types import is_numeric_dtype
@@ -1213,6 +1241,15 @@ class QuickWaterfallPlot(QuickDataPlot):
         self.bt_update = QPushButton('Update', self)
         self.bt_update.clicked.connect(self.update_from_h5)
         self.table.setCellWidget(1, 1, self.bt_update)
+        self.bt_auto_levels = QPushButton('Auto Levels', self)
+        self.bt_auto_levels.clicked.connect(self.auto_levels)
+        self.table.setCellWidget(1, 2, self.bt_auto_levels)
+
+    def auto_levels(self):
+        if hasattr(self, 'data_img') and self.data_img is not None:
+            lo = float(np.nanmin(self.data_img))
+            hi = float(np.nanmax(self.data_img))
+            self.hist.setLevels(lo, hi)
         
     
     def update_combos(self, h5_paths):
@@ -1315,7 +1352,7 @@ class QuickWaterfallPlot(QuickDataPlot):
         
         
         
-        self.img.setImage(Zi.T)
+        self.img.setImage(Zi.T, autoLevels=False)
         self.iso.setData(Zi.T)  
         self.data_img = Zi
         
@@ -1422,6 +1459,15 @@ class Quick2DPlot(QuickDataPlot):
         self.bt_update = QPushButton('Update', self)
         self.bt_update.clicked.connect(self.update_from_h5)
         self.table.setCellWidget(1, 1, self.bt_update)
+        self.bt_auto_levels = QPushButton('Auto Levels', self)
+        self.bt_auto_levels.clicked.connect(self.auto_levels)
+        self.table.setCellWidget(1, 2, self.bt_auto_levels)
+
+    def auto_levels(self):
+        if hasattr(self, 'data_img') and self.data_img is not None:
+            lo = float(np.nanmin(self.data_img))
+            hi = float(np.nanmax(self.data_img))
+            self.hist.setLevels(lo, hi)
 
     def update_combos(self, h5_paths):
         """Update numeric combo models when h5_paths/df change"""
@@ -1610,7 +1656,7 @@ class Quick2DPlot(QuickDataPlot):
 
         del xs_valid, ys_valid, zs_valid
         
-        self.img.setImage(Zi.T)
+        self.img.setImage(Zi.T, autoLevels=False)
         self.iso.setData(Zi.T)  
         self.data_img = Zi
         

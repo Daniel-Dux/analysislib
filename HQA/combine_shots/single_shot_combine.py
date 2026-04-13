@@ -4,7 +4,6 @@ import h5py as h5
 import os
 import json
 import time
-import datetime
 
 def create_dataset_auto(group, name, data, compression, compression_opts, shuffle):
     arr = np.asarray(data)
@@ -22,7 +21,7 @@ def create_dataset_auto(group, name, data, compression, compression_opts, shuffl
 def main():
     
     compression = 'gzip'
-    compression_opts = 4
+    compression_opts = 6
     shuffle = True
     chunks = False
     
@@ -105,6 +104,7 @@ def main():
     shot_basename = os.path.splitext(os.path.basename(h5_path))[0]
     # Detect whether combined file already exists to create a new summary if needed
     combined_existed = os.path.exists(combined_path)
+    delete_flag_from_ds = None
     with h5.File(h5_path, 'r') as src, h5.File(combined_path, 'a') as dst:
         if not combined_existed:
             # mark this as a new summary file for the sequence
@@ -337,7 +337,13 @@ def main():
                 except Exception:
                     pass
 
-    # If requested by globals, delete duplicate shots (keep the first/earliest)
+        # Read delete flag once while dataset handle is valid.
+        try:
+            delete_flag_from_ds = ds.attrs.get('delete_shots', None)
+        except Exception:
+            delete_flag_from_ds = None
+
+    # If requested by globals, delete duplicate shots (keep the current/latest)
     def _truthy(val):
         if isinstance(val, bool):
             return val
@@ -347,137 +353,63 @@ def main():
         return s in ('1', 'true', 'yes', 'y')
 
     delete_flag = globals_dict.get('delete_shots')
-    # also check ds attrs in case lyse wrote the flag there
-    try:
-        with h5.File(combined_path, 'r') as cfile:
-            if 'All Runs' in cfile and shot_basename in cfile['All Runs']:
-                shot_group = cfile['All Runs'][shot_basename]
-                dataset_name = f"{run_name}.dat"
-                if dataset_name in shot_group:
-                    ds = shot_group[dataset_name]
-                    if delete_flag is None:
-                        delete_flag = ds.attrs.get('delete_shots', delete_flag)
-    except Exception:
-        pass
+    if delete_flag is None:
+        delete_flag = delete_flag_from_ds
 
     if _truthy(delete_flag):
         try:
-            def _coerce_time(val, fpath=None):
-                # Try numeric
-                try:
-                    return float(val)
-                except Exception:
-                    pass
-                # Try ISO datetime
-                try:
-                    return datetime.datetime.fromisoformat(str(val)).timestamp()
-                except Exception:
-                    pass
-                # Try common datetime format
-                try:
-                    t = time.strptime(str(val), '%Y-%m-%d %H:%M:%S')
-                    return time.mktime(t)
-                except Exception:
-                    pass
-                # Fallback to file mtime
-                try:
-                    if fpath and os.path.exists(fpath):
-                        return os.path.getmtime(fpath)
-                except Exception:
-                    pass
-                return float('inf')
+            current_path_abs = os.path.abspath(h5_path)
+            combined_path_abs = os.path.abspath(combined_path)
+            current_mtime = os.path.getmtime(current_path_abs) if os.path.exists(current_path_abs) else time.time()
 
-            def _read_run_time(fpath):
+            # Store a small run_name -> latest shot index in the combined file so
+            # old candidate deletion is O(1) and does not open any old shot files.
+            with h5.File(combined_path, 'a') as cfile:
+                raw_index = cfile.attrs.get('delete_shots_index_json', '{}')
+                if isinstance(raw_index, bytes):
+                    raw_index = raw_index.decode('utf-8', errors='ignore')
                 try:
-                    with h5.File(fpath, 'r') as fh:
-                        # check root attrs first
-                        for key in ('run time', 'run_time', 'runtime'):
-                            if key in fh.attrs:
-                                return _coerce_time(fh.attrs[key], fpath)
-                        # check globals group
-                        if 'globals' in fh:
+                    delete_index = json.loads(str(raw_index)) if raw_index else {}
+                except Exception:
+                    delete_index = {}
+                if not isinstance(delete_index, dict):
+                    delete_index = {}
+
+                run_key = str(run_name)
+                previous = delete_index.get(run_key, {})
+                old_path = previous.get('path') if isinstance(previous, dict) else None
+                old_mtime = previous.get('mtime') if isinstance(previous, dict) else None
+
+                if old_path:
+                    old_path_abs = os.path.abspath(str(old_path))
+                    if old_mtime is None:
+                        old_mtime = float('-inf')
+                    else:
+                        try:
+                            old_mtime = float(old_mtime)
+                        except Exception:
+                            old_mtime = float('-inf')
+
+                    safe_to_consider = (
+                        old_path_abs != current_path_abs
+                        and old_path_abs != combined_path_abs
+                        and os.path.exists(old_path_abs)
+                    )
+                    if safe_to_consider and old_mtime <= current_mtime:
+                        try:
+                            os.remove(old_path_abs)
+                        except Exception:
                             try:
-                                for key in ('run time', 'run_time', 'runtime'):
-                                    if key in fh['globals'].attrs:
-                                        return _coerce_time(fh['globals'].attrs[key], fpath)
+                                trash_dir = os.path.join(day_dir, '_deleted_shots')
+                                os.makedirs(trash_dir, exist_ok=True)
+                                base = os.path.basename(old_path_abs)
+                                dest = os.path.join(trash_dir, base)
+                                os.replace(old_path_abs, dest)
                             except Exception:
                                 pass
-                        # check other top-level groups
-                        try:
-                            for k in fh.keys():
-                                if k == 'globals':
-                                    continue
-                                try:
-                                    grp = fh[k]
-                                    for key in ('run time', 'run_time', 'runtime'):
-                                        if key in grp.attrs:
-                                            return _coerce_time(grp.attrs[key], fpath)
-                                except Exception:
-                                    continue
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                return os.path.getmtime(fpath) if os.path.exists(fpath) else float('inf')
 
-            # Optimize deletion: read current shot run_time once and only inspect
-            # files with modification time <= current file mtime. Stop early when
-            # we find any earlier run_time for the same run_name.
-            try:
-                current_rt = _read_run_time(h5_path)
-            except Exception:
-                current_rt = os.path.getmtime(h5_path)
-
-            current_mtime = os.path.getmtime(h5_path) if os.path.exists(h5_path) else float('inf')
-            delete_current = False
-            for fname in os.listdir(day_dir):
-                if not fname.lower().endswith('.h5'):
-                    continue
-                fpath = os.path.join(day_dir, fname)
-                # skip combined and the current file
-                if os.path.abspath(fpath) == os.path.abspath(combined_path) or os.path.abspath(fpath) == os.path.abspath(h5_path):
-                    continue
-                try:
-                    f_mtime = os.path.getmtime(fpath)
-                except Exception:
-                    continue
-                # only consider files that are not newer than current shot
-                if f_mtime > current_mtime:
-                    continue
-                try:
-                    with h5.File(fpath, 'r') as fh:
-                        g = {}
-                        if 'globals' in fh:
-                            try:
-                                g = dict(fh['globals'].attrs)
-                            except Exception:
-                                g = {}
-                        match = False
-                        for key in ('run_name', 'run name', 'run'):
-                            if key in g and g[key] and str(g[key]) == str(run_name):
-                                match = True
-                                break
-                        if not match:
-                            continue
-                        other_rt = _read_run_time(fpath)
-                        if other_rt < current_rt:
-                            delete_current = True
-                            break
-                except Exception:
-                    continue
-
-            if delete_current:
-                try:
-                    os.remove(h5_path)
-                except Exception:
-                    try:
-                        trash_dir = os.path.join(day_dir, '_deleted_shots')
-                        os.makedirs(trash_dir, exist_ok=True)
-                        base = os.path.basename(h5_path)
-                        dest = os.path.join(trash_dir, base)
-                        os.replace(h5_path, dest)
-                    except Exception:
-                        pass
+                delete_index[run_key] = {'path': current_path_abs, 'mtime': current_mtime}
+                cfile.attrs['delete_shots_index_json'] = json.dumps(delete_index)
         except Exception:
             pass
 

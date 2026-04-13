@@ -13,7 +13,7 @@ import sys
 from pyqtgraph.dockarea import *
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import *
-from PyQt5.QtGui import QIntValidator, QStandardItemModel, QStandardItem, QColor
+from PyQt5.QtGui import QIntValidator, QStandardItemModel, QStandardItem, QColor, QTransform
 
 from PIL import ImageColor
 
@@ -202,6 +202,8 @@ class AnalysisPlotPanel(QMainWindow):
         super().__init__(**kwargs)
         
         pg.mkQApp()
+        pg.setConfigOption("background", "w")
+        pg.setConfigOption("foreground", "k")
         
         self.n_rows = n_rows
         
@@ -252,15 +254,15 @@ class AnalysisPlotPanel(QMainWindow):
                 QMessageBox.information(self, 'Lyse queue', 'Lyse queue is already empty.')
                 return
 
-            answer = QMessageBox.question(
-                self,
-                'Remove all shots',
-                f'Remove all {current_nshots} shots from the lyse queue?',
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if answer != QMessageBox.Yes:
-                return
+            # answer = QMessageBox.question(
+            #     self,
+            #     'Remove all shots',
+            #     f'Remove all {current_nshots} shots from the lyse queue?',
+            #     QMessageBox.Yes | QMessageBox.No,
+            #     QMessageBox.No,
+            # )
+            # if answer != QMessageBox.Yes:
+            #     return
 
             app = None
             for module_name in ('lyse.__main__', '__main__'):
@@ -305,8 +307,8 @@ class AnalysisPlotPanel(QMainWindow):
 
             refreshed_paths = lyse.data()
             nshots = len(refreshed_paths) if refreshed_paths is not None else 0
-            if nshots == 0:
-                QMessageBox.information(self, 'Lyse queue', 'Lyse queue cleared.')
+            # if nshots == 0:
+            #     QMessageBox.information(self, 'Lyse queue', 'Lyse queue cleared.')
 
             self.update_h5_paths(refreshed_paths)
             self.refresh()
@@ -796,7 +798,7 @@ class Quick1DPlot(QuickDataPlot):
         
         #self.table.setFixedSize(self.table.sizeHint())
         
-        self.curves += [self.plot.plot(pen=pg.mkPen(color = color_palette[self.nplots - 1], width = 1.5), symbol ='x', symbolPen = None, symbolBrush = None)]
+        self.curves += [self.plot.plot(pen=pg.mkPen(color = color_palette[self.nplots - 1], width = 1.5), symbol ='o', symbolPen = None, symbolBrush = None)]
         
         # Add ErrorBarItem for each curve
         error_bar = pg.ErrorBarItem(pen=pg.mkPen(color=color_palette[self.nplots - 1], width=1.5))
@@ -1178,7 +1180,9 @@ class QuickWaterfallPlot(QuickDataPlot):
         # but it works for a very simple use like this. 
         self.img.hoverEvent = self.imageHoverEvent
         
-        self.img.translate(-0.5, -0.5)
+        initial_transform = QTransform()
+        initial_transform.translate(-0.5, -0.5)
+        self.img.setTransform(initial_transform)
         
         self.scalex = 1
         self.scaley = 1
@@ -1295,8 +1299,9 @@ class QuickWaterfallPlot(QuickDataPlot):
             
         # here we don't want to assume that the data is on a grid
         # this can happen if the parameters where changed between two sweeps
-        xi = np.linspace(xs.min(), xs.max(), 200)
-        yi = np.linspace(ys.min(), ys.max(), 200)
+        grid_size = int(np.clip(np.sqrt(len(zs)) * 2, 64, 200))
+        xi = np.linspace(xs.min(), xs.max(), grid_size)
+        yi = np.linspace(ys.min(), ys.max(), grid_size)
         
         Xi, Yi = np.meshgrid(xi, yi)
         
@@ -1318,11 +1323,10 @@ class QuickWaterfallPlot(QuickDataPlot):
         newscalex = xi[1] - xi[0]
         newscaley = yi[1] - yi[0]
         
-        transx = (xi[0] - (self.cx - 0.5 * self.scalex)) / newscalex - 0.5
-        transy = (yi[0] - (self.cy - 0.5 * self.scaley)) / newscaley - 0.5
-        
-        self.img.scale(newscalex/self.scalex, newscaley/self.scaley)
-        self.img.translate(transx,transy)
+        transform = QTransform()
+        transform.translate(xi[0] - 0.5 * newscalex, yi[0] - 0.5 * newscaley)
+        transform.scale(newscalex, newscaley)
+        self.img.setTransform(transform)
         
         self.scalex = newscalex
         self.scaley = newscaley
@@ -1383,7 +1387,9 @@ class Quick2DPlot(QuickDataPlot):
         # but it works for a very simple use like this. 
         self.img.hoverEvent = self.imageHoverEvent
         
-        self.img.translate(-0.5, -0.5)
+        initial_transform = QTransform()
+        initial_transform.translate(-0.5, -0.5)
+        self.img.setTransform(initial_transform)
         
         self.scalex = 1
         self.scaley = 1
@@ -1392,6 +1398,8 @@ class Quick2DPlot(QuickDataPlot):
         self.cy = 0
         
         self.nplots = 0
+        self._df_idx_map_cache = {}
+        self._df_idx_map_signature = None
         
         self.table.setColumnCount(3)
         self.table.setRowCount(2)
@@ -1451,47 +1459,115 @@ class Quick2DPlot(QuickDataPlot):
                 
         self.data_extractor.clean_children([idxx, idxy, idxz])
         self.clean_data_extractor_if_needed()
+
+    def _build_numeric_df_index_map(self):
+        df = self.ap.df
+        if df is None or not hasattr(df, 'columns') or not hasattr(df, 'dtypes'):
+            self._df_idx_map_cache = {}
+            self._df_idx_map_signature = None
+            return {}
+
+        try:
+            signature = (
+                tuple(df.columns.tolist()),
+                tuple(str(df.dtypes[col]) for col in df.columns)
+            )
+        except Exception:
+            signature = None
+
+        if signature is not None and signature == self._df_idx_map_signature:
+            return self._df_idx_map_cache
+
+        idx_map = {}
+        for midx in df.columns:
+            try:
+                if not is_numeric_dtype(df.dtypes[midx]):
+                    continue
+            except Exception:
+                continue
+
+            if isinstance(midx, tuple):
+                label = ','.join([str(x) for x in midx if x not in (None, '')])
+            else:
+                label = str(midx)
+
+            if not label:
+                continue
+
+            idx_key = tuple(label.split(','))
+            if idx_key not in idx_map:
+                idx_map[idx_key] = midx
+
+        self._df_idx_map_cache = idx_map
+        self._df_idx_map_signature = signature
+        return idx_map
+
+    def _get_numeric_values_from_df(self, idx, n_points, df, df_idx_map):
+        if idx and idx[0] == 'shot number':
+            return np.arange(n_points, dtype=float)
+
+        col = df_idx_map.get(idx)
+        if col is None or df is None:
+            return None
+
+        try:
+            values = np.asarray(df[col].to_numpy(), dtype=float)
+            if len(values) != n_points:
+                return None
+            return values
+        except Exception:
+            return None
         
     def update(self, murks = None):
-        
-        # Use lists instead of np.append which causes memory leaks
-        xs_list = []
-        ys_list = []
-        zs_list = []
-        
+
         idxx = self.combox.get_idx()
         idxy = self.comboy.get_idx()
         idxz = self.comboz.get_idx()
         
         # Use all h5_paths, not just selected ones
         h5_paths = self.get_all_h5_paths()
-        
-        for i, h5_path in enumerate(h5_paths):
-            
-            data = self.data_extractor.get_data(h5_path)[0]
-            if idxx[0] == 'shot number':
-                x_val = i
-            else:
-                x_val = data.get(idxx) if isinstance(data, dict) else None
-            
-            if idxy[0] == 'shot number':
-                y_val = i
-            else:
-                y_val = data.get(idxy) if isinstance(data, dict) else None
-            
-            if idxz[0] == 'shot number':
-                z_val = i
-            else:
-                z_val = data.get(idxz) if isinstance(data, dict) else None
-            
-            xs_list.append(x_val if x_val is not None else np.nan)
-            ys_list.append(y_val if y_val is not None else np.nan)
-            zs_list.append(z_val if z_val is not None else np.nan)
-        
-        # Convert lists to arrays after loop
-        xs = np.array(xs_list, dtype=float)
-        ys = np.array(ys_list, dtype=float)
-        zs = np.array(zs_list, dtype=float)
+        n_paths = len(h5_paths)
+        if n_paths == 0:
+            return
+
+        df = self.ap.df
+        df_idx_map = self._build_numeric_df_index_map()
+
+        xs = self._get_numeric_values_from_df(idxx, n_paths, df, df_idx_map)
+        ys = self._get_numeric_values_from_df(idxy, n_paths, df, df_idx_map)
+        zs = self._get_numeric_values_from_df(idxz, n_paths, df, df_idx_map)
+
+        if xs is None or ys is None or zs is None:
+            # Fallback path for selections not available in dataframe
+            xs_list = []
+            ys_list = []
+            zs_list = []
+
+            for i, h5_path in enumerate(h5_paths):
+
+                data = self.data_extractor.get_data(h5_path)[0]
+                if idxx[0] == 'shot number':
+                    x_val = i
+                else:
+                    x_val = data.get(idxx) if isinstance(data, dict) else None
+
+                if idxy[0] == 'shot number':
+                    y_val = i
+                else:
+                    y_val = data.get(idxy) if isinstance(data, dict) else None
+
+                if idxz[0] == 'shot number':
+                    z_val = i
+                else:
+                    z_val = data.get(idxz) if isinstance(data, dict) else None
+
+                xs_list.append(x_val if x_val is not None else np.nan)
+                ys_list.append(y_val if y_val is not None else np.nan)
+                zs_list.append(z_val if z_val is not None else np.nan)
+
+            xs = np.array(xs_list, dtype=float)
+            ys = np.array(ys_list, dtype=float)
+            zs = np.array(zs_list, dtype=float)
         
         # Remove NaN values
         valid_mask = ~(np.isnan(xs) | np.isnan(ys) | np.isnan(zs))
@@ -1501,21 +1577,38 @@ class Quick2DPlot(QuickDataPlot):
         
         if len(xs_valid) == 0 or len(ys_valid) == 0 or len(zs_valid) == 0:
             return
-        
-        # here we don't want to assume that the data is on a grid
-        # this can happen if the parameters where changed between two sweeps
-        
-        xi = np.linspace(xs_valid.min(), xs_valid.max(), 200)
-        yi = np.linspace(ys_valid.min(), ys_valid.max(), 200)
-        
-        Xi, Yi = np.meshgrid(xi, yi)
-        
-        from scipy.interpolate import griddata
-        
-        Zi = griddata((xs_valid, ys_valid), zs_valid, (Xi, Yi), 'nearest')
-        
-        # Clear large intermediate data after interpolation
-        del xs_valid, ys_valid, zs_valid, Xi, Yi
+
+        # Fast path: if data already forms a regular grid, avoid interpolation.
+        ux, invx = np.unique(xs_valid, return_inverse=True)
+        uy, invy = np.unique(ys_valid, return_inverse=True)
+        grid_points = ux.size * uy.size
+
+        if ux.size > 1 and uy.size > 1 and grid_points <= max(40000, 4 * len(zs_valid)):
+            z_sum = np.zeros((uy.size, ux.size), dtype=float)
+            z_count = np.zeros((uy.size, ux.size), dtype=float)
+            np.add.at(z_sum, (invy, invx), zs_valid)
+            np.add.at(z_count, (invy, invx), 1.0)
+            Zi = np.full((uy.size, ux.size), np.nan, dtype=float)
+            valid = z_count > 0
+            Zi[valid] = z_sum[valid] / z_count[valid]
+            xi = ux
+            yi = uy
+        else:
+            # Fallback for scattered points with adaptive resolution.
+            grid_size = int(np.clip(np.sqrt(len(zs_valid)) * 2, 64, 200))
+            xi = np.linspace(xs_valid.min(), xs_valid.max(), grid_size)
+            yi = np.linspace(ys_valid.min(), ys_valid.max(), grid_size)
+
+            Xi, Yi = np.meshgrid(xi, yi)
+
+            from scipy.interpolate import griddata
+
+            Zi = griddata((xs_valid, ys_valid), zs_valid, (Xi, Yi), 'nearest')
+
+            # Clear large intermediate data after interpolation
+            del Xi, Yi
+
+        del xs_valid, ys_valid, zs_valid
         
         self.img.setImage(Zi.T)
         self.iso.setData(Zi.T)  
@@ -1525,11 +1618,10 @@ class Quick2DPlot(QuickDataPlot):
         newscalex = xi[1] - xi[0]
         newscaley = yi[1] - yi[0]
         
-        transx = (xi[0] - (self.cx - 0.5 * self.scalex)) / newscalex - 0.5
-        transy = (yi[0] - (self.cy - 0.5 * self.scaley)) / newscaley - 0.5
-        
-        self.img.scale(newscalex/self.scalex, newscaley/self.scaley)
-        self.img.translate(transx,transy)
+        transform = QTransform()
+        transform.translate(xi[0] - 0.5 * newscalex, yi[0] - 0.5 * newscaley)
+        transform.scale(newscalex, newscaley)
+        self.img.setTransform(transform)
         
         self.scalex = newscalex
         self.scaley = newscaley

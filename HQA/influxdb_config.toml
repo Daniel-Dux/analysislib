@@ -1,0 +1,64 @@
+# InfluxDB writer configuration for lyse single-shot analysis
+# ---------------------------------------------------------------
+# This config controls which data from each shot is sent to InfluxDB.
+
+[INFLUXDB]
+# Connection settings
+host = "smartlab.physi.uni-heidelberg.de"
+port = 8086
+token = "hZMRkMba_IUsxOlampLHgcEMmQTUnND0GbeopHqBnrxTIDA-Y7XgLQBssRIi7gWWsNtckUacJkP-WKPtc0PYlQ=="
+org = "ultracold"
+bucket = "data"
+
+# The InfluxDB measurement name for each data point
+measurement = "shot_data"
+
+# Whether to include the time since the previous shot as a field
+include_time_since_previous_shot = true
+
+# --------------------------------------------------------------------------
+# TAGS — indexed metadata attached to every point (used for filtering/grouping)
+# --------------------------------------------------------------------------
+# Tags should be low-cardinality values (e.g. apparatus name, camera name).
+#
+# [TAGS.static]   — fixed key/value pairs added to every point
+# [TAGS.globals]  — values read from the shot's labscript globals
+#                    key = tag name sent to InfluxDB
+#                    value = global variable name in the shot file
+
+[TAGS.static]
+Experiment = "HQA"
+Data_Source = "Experiment_Control"
+
+
+[TAGS.globals]
+# Example: send the "sequence" global as the "sequence" tag
+# sequence = "sequence"
+
+# --------------------------------------------------------------------------
+# FIELDS — numeric (or string) values stored for each point
+# --------------------------------------------------------------------------
+# Fields are the actual measured/computed quantities.
+#
+# Each entry under [FIELDS.singleshot] maps:
+#   influxdb_field_name = ["analysis_group", "result_key"]
+#
+# These refer to columns in the lyse single-shot dataframe, which are
+# typically saved via  run.save_result()  or  run.save_results_dict()
+# inside other analysis routines.
+#
+# Example: if a routine saves results under the group "fluo_background_analysis"
+#   with keys "fluo_background_MOT_Counting_Natoms" and "signal_sum",
+#   you would write:
+#
+#   Natoms = ["fluo_background_analysis", "fluo_background_MOT_Counting_Natoms"]
+#   signal = ["fluo_background_analysis", "signal_sum"]
+
+[FIELDS.singleshot]
+Atomnumber = ["fluo_background_analysis", "fluo_background_MOT_Counting_Natoms"]
+
+# You can also send labscript globals as fields (useful for numeric globals):
+#   Each entry maps:  influxdb_field_name = "global_variable_name"
+
+[FIELDS.globals]
+# MOT_loading_time = "MOT_loading_time"

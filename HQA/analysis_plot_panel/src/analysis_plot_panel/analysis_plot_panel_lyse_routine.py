@@ -9,8 +9,8 @@ import numpy as np
 
 from __init__ import AnalysisPlotPanel
 
-from user_plots import ImagingPlot, SpectrumPlot, MultiSpectrumPlot, TracePlot, FluoBackgroundPlot, ADwinTracesPlot
-from user_data_extractors import FluoDataExtractor, AbsorptionDataExtractor, SpectrumDataExtractor, ScopeDataExtractor, FluoBackgroundDataExtractor, ADwinTracesDataExtractor
+from user_plots import ImagingPlot, SpectrumPlot, MultiSpectrumPlot, TracePlot, FluoBackgroundPlot, ADwinTracesPlot, NuvuImagePlot, OrcaImagePlot, OrcaAtomFinderPlot
+from user_data_extractors import FluoDataExtractor, AbsorptionDataExtractor, SpectrumDataExtractor, ScopeDataExtractor, FluoBackgroundDataExtractor, ADwinTracesDataExtractor, NuvuDataExtractor, OrcaDataExtractor, OrcaAtomFinderDataExtractor
 from data_extractors import MultiDataExtractor
 
 
@@ -93,6 +93,24 @@ plot_name = 'ADwin Traces'
 if not plot_name in fm.ap.plots:
     atp = ADwinTracesPlot(plot_name)
     fm.ap.add_plot_dock(plot_name, atp, ADwinTracesDataExtractor())
+
+# # Nuvu camera image viewer
+# plot_name = 'Nuvu Images'
+# if not plot_name in fm.ap.plots:
+#     nip = NuvuImagePlot(plot_name)
+#     fm.ap.add_plot_dock(plot_name, nip, NuvuDataExtractor())
+
+# Orca camera image viewer (with ROI overlays)
+plot_name = 'Orca Images'
+if not plot_name in fm.ap.plots:
+    oip = OrcaImagePlot(plot_name)
+    fm.ap.add_plot_dock(plot_name, oip, OrcaDataExtractor())
+
+# Orca single-atom detection (view selector: raw / photons / photons + atoms)
+plot_name = 'Orca Atom Finder'
+if not plot_name in fm.ap.plots:
+    oafp = OrcaAtomFinderPlot(plot_name)
+    fm.ap.add_plot_dock(plot_name, oafp, OrcaAtomFinderDataExtractor())
 
 #imaging = 'mot_counting'
 #for cam in cams[imaging]:

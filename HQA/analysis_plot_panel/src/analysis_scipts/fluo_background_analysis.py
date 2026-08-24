@@ -331,6 +331,8 @@ if all_labels:
                     if orientation in images_group:
                         ori_group = images_group[orientation]
                         for label in all_labels.get(orientation, []):
+                            if label != camera_name:
+                                continue
                             if label in ori_group:
                                 label_group = ori_group[label]
                                 available_image_names = [key for key in label_group.keys() 
@@ -370,6 +372,8 @@ if signal_image is None:
     for orientation, labels in all_labels.items():
         if labels:  # If there are any labels for this orientation
             for label in labels:
+                if label != camera_name:
+                    continue
                 # Try the possible image names
                 for image_name in possible_image_names:
                     try:
@@ -398,7 +402,7 @@ if signal_image is None:
     # print("\nTrying common combinations with standard orientations...")
     # Common orientations that might exist
     common_orientations = ['PoC6', camera_name, 'fluorescence', 'MOT_Counting']
-    common_labels = [camera_name, 'signal', 'atoms', 'exposure', 'image']
+    common_labels = [camera_name]
     
     for orientation in common_orientations:
         for label in common_labels:
@@ -478,20 +482,18 @@ if signal_image is None:
     print("  with h5py.File('your_file.h5', 'r') as f:")
     print("      print(f['images'].keys())")
     print("="*60)
-    
-    # Raise exception instead of sys.exit() to allow proper error handling
-    raise RuntimeError("Could not load signal image from HDF5 file")
+    print("No image for this camera in this shot — skipping analysis.")
 
 #################################################################
 # Background Recording or Loading
 #################################################################
 
 # Flag to track if we should continue with analysis
-skip_analysis = False
+skip_analysis = signal_image is None
 save_zero_results = False
 skip_reason = None
 
-if record_background:
+if not skip_analysis and record_background:
     # Record new background mode: Save current image as background
     print("\n" + "="*60)
     print("RECORDING NEW BACKGROUND IMAGE")
@@ -541,7 +543,7 @@ if record_background:
         print(f"ERROR: Failed to save background image: {e}")
         raise RuntimeError(f"Failed to save background image: {e}")
         
-else:
+elif not skip_analysis:
     # Normal mode: Load existing background from file
     # print(f"\nLoading background image from: {background_file}")
     
@@ -744,7 +746,8 @@ if not skip_analysis:
     run.save_result('fluo_background_'+f'{camera_name}_label', found_label)
     run.save_result('fluo_background_'+f'{camera_name}_image_name', found_image_name)
 
-    # Save processed images
+    # Save raw and processed images
+    run.save_result_array('fluo_background_'+f'{camera_name}_mot_image', signal_image)
     run.save_result_array('fluo_background_'+f'{camera_name}_corrected_image', corrected_image)
     run.save_result_array('fluo_background_'+f'{camera_name}_background_avg', background_avg)
 

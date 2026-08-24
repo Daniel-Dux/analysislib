@@ -23,8 +23,16 @@ def main():
     compression = 'gzip'
     compression_opts = 6
     shuffle = True
-    chunks = False
-    
+    chunks = True  # required for gzip compression; True = auto chunk size
+
+    def _truthy(val):
+        if isinstance(val, bool):
+            return val
+        if val is None:
+            return False
+        s = str(val).lower()
+        return s in ('1', 'true', 'yes', 'y')
+
     # Check if running in real-time (spinning top) mode by checking if lyse.path is set
     try:
         h5_path = lyse.path
@@ -35,14 +43,33 @@ def main():
 
     # Read globals directly from the shot HDF5 (universal approach).
     globals_dict = {}
+    globals_units = {}
     try:
         with h5.File(h5_path, 'r') as src:
             if 'globals' in src:
                 # Prefer top-level globals attributes (most common layout)
                 globals_dict = dict(src['globals'].attrs)
+                # Read units and variable values from subgroups:
+                # /globals/<group_name>/ holds variable values as attrs;
+                # /globals/<group_name>/units/ holds unit strings.
+                for group_name in src['globals'].keys():
+                    try:
+                        grp = src['globals'][group_name]
+                        # Read variable values (don't overwrite top-level attrs)
+                        for k, v in grp.attrs.items():
+                            if k not in globals_dict:
+                                globals_dict[k] = v
+                        if 'units' in grp:
+                            for k, v in grp['units'].attrs.items():
+                                unit_str = str(v) if not isinstance(v, str) else v
+                                if unit_str:
+                                    globals_units[k] = unit_str
+                    except Exception:
+                        pass
     except Exception:
         # If opening fails, leave globals_dict empty and continue
         globals_dict = {}
+        globals_units = {}
 
     # Determine run name to use as combined filename
     run_name = None
@@ -121,6 +148,19 @@ def main():
         # If globals were empty earlier, try again from the open src handle
         if not globals_dict and 'globals' in src:
             globals_dict = dict(src['globals'].attrs)
+            for group_name in src['globals'].keys():
+                try:
+                    grp = src['globals'][group_name]
+                    for k, v in grp.attrs.items():
+                        if k not in globals_dict:
+                            globals_dict[k] = v
+                    if 'units' in grp:
+                        for k, v in grp['units'].attrs.items():
+                            unit_str = str(v) if not isinstance(v, str) else v
+                            if unit_str:
+                                globals_units[k] = unit_str
+                except Exception:
+                    pass
 
         # Re-evaluate run_name using the globals read from the file
         if not run_name:
@@ -195,12 +235,28 @@ def main():
             except (TypeError, ValueError):
                 ds.attrs[k] = json.dumps(v, default=str)
 
+        # Write global units as attributes prefixed with 'units/'.
+        for k, v in globals_units.items():
+            try:
+                ds.attrs[f'units/{k}'] = v
+            except (TypeError, ValueError):
+                ds.attrs[f'units/{k}'] = json.dumps(v, default=str)
+
         # Copy images if present under '/images/<orientation>/<label>/<image>'
         if 'images' in src:
             images_root = shot_group.require_group('Images')
             for orientation in src['images'].keys():
                 for label in src['images'][orientation].keys():
                     for image_name in src['images'][orientation][label].keys():
+                        # Gate copying on globals: orca labels → orca_image_save,
+                        # all other cameras → mot_image_save
+                        if label.lower().startswith('orca'):
+                            if not _truthy(globals_dict.get('orca_image_save')):
+                                continue
+                        else:
+                            if not _truthy(globals_dict.get('mot_image_save')):
+                                continue
+
                         src_path = f"/images/{orientation}/{label}/{image_name}"
                         src_obj = src[src_path]
 
@@ -285,6 +341,25 @@ def main():
                                 except Exception:
                                     ds.attrs[f"{grp_name}/{item_name}"] = json.dumps(data.tolist() if hasattr(data, 'tolist') else str(data), default=str)
                             else:
+                                # Skip image arrays based on globals flags.
+                                # For known analysis groups, gate raw images and
+                                # processed/metadata arrays separately.
+                                _skip_img = False
+                                if grp_name == 'orca_image_analysis':
+                                    if item_name.endswith('_image'):
+                                        _skip_img = not _truthy(globals_dict.get('orca_image_save'))
+                                    else:
+                                        # processed image, roi_metadata, etc.
+                                        _skip_img = not _truthy(globals_dict.get('orca_image_processed_save'))
+                                elif grp_name == 'fluo_background_analysis':
+                                    if item_name.endswith('_mot_image'):
+                                        _skip_img = not _truthy(globals_dict.get('mot_image_save'))
+                                    else:
+                                        # corrected_image, background_avg, smooth, etc.
+                                        _skip_img = not _truthy(globals_dict.get('mot_image_processed_save'))
+                                if _skip_img:
+                                    continue
+
                                 # For array data, store it as a dataset in a results group
                                 # Use unique name if it already exists
                                 ds_name = item_name
@@ -344,13 +419,6 @@ def main():
             delete_flag_from_ds = None
 
     # If requested by globals, delete duplicate shots (keep the current/latest)
-    def _truthy(val):
-        if isinstance(val, bool):
-            return val
-        if val is None:
-            return False
-        s = str(val).lower()
-        return s in ('1', 'true', 'yes', 'y')
 
     delete_flag = globals_dict.get('delete_shots')
     if delete_flag is None:

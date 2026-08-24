@@ -25,6 +25,9 @@ from combined_file_utils import (
 logger = logging.getLogger(__name__)
 
 class FluoDataExtractor(DataExtractor):
+    # Full 2D image + 6 arrays per shot; cap cache to avoid GB-scale RAM usage
+    MAX_CACHE_SIZE = 10
+
     def __init__(self, imaging, cam, **kwargs):
         
         super().__init__(**kwargs)
@@ -170,47 +173,53 @@ class FluoDataExtractor(DataExtractor):
         cam = self.cam
         
         try:
-            from uncertainties import ufloat
-            
-            N = ufloat(*run.get_results(imaging, cam+'_Natoms', cam+'_Natoms_err'))
-            Nx = ufloat(*run.get_results(imaging, cam+'_Nx', cam+'_Nx_err'))
-            Ny = ufloat(*run.get_results(imaging, cam+'_Ny', cam+'_Ny_err'))
-            
-            sx = ufloat(*run.get_results(imaging, cam+'_sx', cam+'_sx_err'))
-            sy = ufloat(*run.get_results(imaging, cam+'_sy', cam+'_sy_err'))
-            cx = ufloat(*run.get_results(imaging, cam+'_cx', cam+'_cx_err'))
-            cy = ufloat(*run.get_results(imaging, cam+'_cy', cam+'_cy_err'))
-            
-            axesx, axesy = run.get_results(imaging, cam+'_axesx', cam+'_axesy')
-            
-            tabledata = np.array([
-                (axesx,'{:.1ueS}'.format(Nx),'{:.1uS}'.format(sx),'{:.1uS}'.format(cx)), 
-                (axesy, '{:.1ueS}'.format(Ny),'{:.1uS}'.format(sy),'{:.1uS}'.format(cy))
-                ], dtype=[('axis',object),('N ('+'{:.1ueS}'.format(N)+')', object), ('c (mm)', object), ('s (mm)', object)])
-    
-            data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid = run.get_result_arrays(imaging, cam+'_diff_image',
-                                                 cam+'_xsum',
-                                                 cam+'_ysum',
-                                                 cam+'_xfit', 
-                                                 cam+'_yfit',
-                                                 cam+'_xgrid',
-                                                 cam+'_ygrid')
-            
-            warning = run.get_result(imaging, cam+'_warning')
-        except:
-            data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning = np.zeros((2,2)), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2),np.array([['no_data_x'],['no_data_y']]), 'no data in shot'
-            
+            try:
+                from uncertainties import ufloat
+                
+                N = ufloat(*run.get_results(imaging, cam+'_Natoms', cam+'_Natoms_err'))
+                Nx = ufloat(*run.get_results(imaging, cam+'_Nx', cam+'_Nx_err'))
+                Ny = ufloat(*run.get_results(imaging, cam+'_Ny', cam+'_Ny_err'))
+                
+                sx = ufloat(*run.get_results(imaging, cam+'_sx', cam+'_sx_err'))
+                sy = ufloat(*run.get_results(imaging, cam+'_sy', cam+'_sy_err'))
+                cx = ufloat(*run.get_results(imaging, cam+'_cx', cam+'_cx_err'))
+                cy = ufloat(*run.get_results(imaging, cam+'_cy', cam+'_cy_err'))
+                
+                axesx, axesy = run.get_results(imaging, cam+'_axesx', cam+'_axesy')
+                
+                tabledata = np.array([
+                    (axesx,'{:.1ueS}'.format(Nx),'{:.1uS}'.format(sx),'{:.1uS}'.format(cx)), 
+                    (axesy, '{:.1ueS}'.format(Ny),'{:.1uS}'.format(sy),'{:.1uS}'.format(cy))
+                    ], dtype=[('axis',object),('N ('+'{:.1ueS}'.format(N)+')', object), ('c (mm)', object), ('s (mm)', object)])
+        
+                data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid = run.get_result_arrays(imaging, cam+'_diff_image',
+                                                     cam+'_xsum',
+                                                     cam+'_ysum',
+                                                     cam+'_xfit', 
+                                                     cam+'_yfit',
+                                                     cam+'_xgrid',
+                                                     cam+'_ygrid')
+                
+                warning = run.get_result(imaging, cam+'_warning')
+            except:
+                data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning = np.zeros((2,2)), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2),np.array([['no_data_x'],['no_data_y']]), 'no data in shot'
+        finally:
+            if hasattr(run, 'close'):
+                run.close()
 
         return data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning
     
 class AbsorptionDataExtractor(DataExtractor):
+    # Full 2D image + several arrays per shot; cap cache to avoid GB-scale RAM usage
+    MAX_CACHE_SIZE = 10
+
     def __init__(self, imaging, cam, **kwargs):
-        
+
         super().__init__(**kwargs)
-        
+
         self.imaging = imaging
         self.cam = cam
-    
+
     def _extract_from_combined(self, combined_path, shot_basename, run_name):
         """Try to extract data from combined file"""
         try:
@@ -330,33 +339,37 @@ class AbsorptionDataExtractor(DataExtractor):
         imaging = self.imaging
         cam = self.cam
         try:
-            N = run.get_result(imaging, cam+'_Natoms')
-            Nx = ufloat(*run.get_results(imaging, cam+'_Nx', cam+'_Nx_err'))
-            Ny = ufloat(*run.get_results(imaging, cam+'_Ny', cam+'_Ny_err'))
-            
-            sx = ufloat(*run.get_results(imaging, cam+'_sx', cam+'_sx_err'))
-            sy = ufloat(*run.get_results(imaging, cam+'_sy', cam+'_sy_err'))
-            cx = ufloat(*run.get_results(imaging, cam+'_cx', cam+'_cx_err'))
-            cy = ufloat(*run.get_results(imaging, cam+'_cy', cam+'_cy_err'))
-            
-            axesx, axesy = run.get_results(imaging, cam+'_axesx', cam+'_axesy')
-            
-            tabledata = np.array([
-                (axesx, '{:.1ueS}'.format(Nx),'{:.1uS}'.format(sx),'{:.1uS}'.format(cx)), 
-                (axesy, '{:.1ueS}'.format(Ny),'{:.1uS}'.format(sy),'{:.1uS}'.format(cy))
-                ], dtype=[('axis',object),('N ('+'{:.0f}'.format(N)+')', object), ('c (mm)', object), ('s (mm)', object)])
-    
-            data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid = run.get_result_arrays(imaging, cam+'_OD_image',
-                                                 cam+'_xsum',
-                                                 cam+'_ysum',
-                                                 cam+'_xfit', 
-                                                 cam+'_yfit',
-                                                 cam+'_xgrid',
-                                                 cam+'_ygrid')
-            
-            warning = run.get_result(imaging, cam+'_warning')
-        except:
-            data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning = np.zeros((2,2)), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2),np.array([['no_data_x'],['no_data_y']]), 'no data in shot'
+            try:
+                N = run.get_result(imaging, cam+'_Natoms')
+                Nx = ufloat(*run.get_results(imaging, cam+'_Nx', cam+'_Nx_err'))
+                Ny = ufloat(*run.get_results(imaging, cam+'_Ny', cam+'_Ny_err'))
+                
+                sx = ufloat(*run.get_results(imaging, cam+'_sx', cam+'_sx_err'))
+                sy = ufloat(*run.get_results(imaging, cam+'_sy', cam+'_sy_err'))
+                cx = ufloat(*run.get_results(imaging, cam+'_cx', cam+'_cx_err'))
+                cy = ufloat(*run.get_results(imaging, cam+'_cy', cam+'_cy_err'))
+                
+                axesx, axesy = run.get_results(imaging, cam+'_axesx', cam+'_axesy')
+                
+                tabledata = np.array([
+                    (axesx, '{:.1ueS}'.format(Nx),'{:.1uS}'.format(sx),'{:.1uS}'.format(cx)), 
+                    (axesy, '{:.1ueS}'.format(Ny),'{:.1uS}'.format(sy),'{:.1uS}'.format(cy))
+                    ], dtype=[('axis',object),('N ('+'{:.0f}'.format(N)+')', object), ('c (mm)', object), ('s (mm)', object)])
+        
+                data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid = run.get_result_arrays(imaging, cam+'_OD_image',
+                                                     cam+'_xsum',
+                                                     cam+'_ysum',
+                                                     cam+'_xfit', 
+                                                     cam+'_yfit',
+                                                     cam+'_xgrid',
+                                                     cam+'_ygrid')
+                
+                warning = run.get_result(imaging, cam+'_warning')
+            except:
+                data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning = np.zeros((2,2)), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2), np.arange(2),np.array([['no_data_x'],['no_data_y']]), 'no data in shot'
+        finally:
+            if hasattr(run, 'close'):
+                run.close()
             
         return data_img, xsum, ysum, datax_fit, datay_fit, xgrid, ygrid, tabledata, warning
 
@@ -386,37 +399,43 @@ class SpectrumDataExtractor(DataExtractor):
         spectrum_name = name+' '+frametype
         
         try:
-            
-            f0 = run.get_result(imaging, spectrum_name+' f0')
-            f1 = run.get_result(imaging, spectrum_name+' f1')
-            duration = run.get_result(imaging, spectrum_name+' duration')
-            
-            kappa = run.get_result(imaging, spectrum_name+' kappa')
-            omega0 = run.get_result(imaging, spectrum_name+' omega0')
-            A = run.get_result(imaging, spectrum_name+' A')
-            offset = run.get_result(imaging, spectrum_name+' offset')
-            n_photons_total = run.get_result(imaging, spectrum_name+' n_photons_total')
-            
-            
-            n_photons = run.get_result_array(imaging, spectrum_name+' n_photons')
-            freqs = run.get_result_array(imaging, spectrum_name+' freqs')
-            
-            
-            tabledata = np.array([
-                ('{:.0f}'.format(n_photons_total),f'{omega0/2/np.pi:.3f}',f'{(kappa/2/np.pi):.3f}')
-                ], dtype = [('N photons', object), ('omega0/2/pi (MHz)', object), ('kappa/2/pi (MHz)', object)])
-            
-            warning = run.get_result(imaging, spectrum_name+' warning')
-        except Exception:
-            freqs, n_photons, omega0, kappa, A, offset, f0, f1, duration,tabledata, warning = np.array([0.,1.]), np.array([0.,1.]), 0., 0., 0., 0.,0., 1, 1,np.arange(2,dtype = 'float64'), 'no data in shot'
+            try:
+                f0 = run.get_result(imaging, spectrum_name+' f0')
+                f1 = run.get_result(imaging, spectrum_name+' f1')
+                duration = run.get_result(imaging, spectrum_name+' duration')
+                
+                kappa = run.get_result(imaging, spectrum_name+' kappa')
+                omega0 = run.get_result(imaging, spectrum_name+' omega0')
+                A = run.get_result(imaging, spectrum_name+' A')
+                offset = run.get_result(imaging, spectrum_name+' offset')
+                n_photons_total = run.get_result(imaging, spectrum_name+' n_photons_total')
+                
+                
+                n_photons = run.get_result_array(imaging, spectrum_name+' n_photons')
+                freqs = run.get_result_array(imaging, spectrum_name+' freqs')
+                
+                
+                tabledata = np.array([
+                    ('{:.0f}'.format(n_photons_total),f'{omega0/2/np.pi:.3f}',f'{(kappa/2/np.pi):.3f}')
+                    ], dtype = [('N photons', object), ('omega0/2/pi (MHz)', object), ('kappa/2/pi (MHz)', object)])
+                
+                warning = run.get_result(imaging, spectrum_name+' warning')
+            except Exception:
+                freqs, n_photons, omega0, kappa, A, offset, f0, f1, duration,tabledata, warning = np.array([0.,1.]), np.array([0.,1.]), 0., 0., 0., 0.,0., 1, 1,np.arange(2,dtype = 'float64'), 'no data in shot'
+        finally:
+            if hasattr(run, 'close'):
+                run.close()
             
         return freqs, n_photons, omega0, kappa, A, offset, f0, f1, duration, tabledata , warning
         
 class ScopeDataExtractor(DataExtractor):
+    # Long trace arrays per shot; cap cache to avoid several-hundred-MB usage
+    MAX_CACHE_SIZE = 20
+
     def __init__(self, name, frametype, **kwargs):
-        
+
         super().__init__(**kwargs)
-        
+
         self.name = name
         self.frametype = frametype
         
@@ -437,26 +456,32 @@ class ScopeDataExtractor(DataExtractor):
         spectrum_name = name
         
         try:
-            
-            sig_type = run.get_result(imaging, spectrum_name+' sig_type')
-            
-            tabledata = np.array([], dtype = [])
-            
-            volts = run.get_result_array(imaging, spectrum_name+' volts')
-            times = run.get_result_array(imaging, spectrum_name+' times')
-            
-            warning = run.get_result(imaging, spectrum_name+' warning')
-        except Exception:
-            volts, times, warning = np.array([0.,1.]),np.array([0.,1.]),'no data in shot'
-            tabledata, sig_type = np.array([], dtype = []), 'trace'
+            try:
+                sig_type = run.get_result(imaging, spectrum_name+' sig_type')
+                
+                tabledata = np.array([], dtype = [])
+                
+                volts = run.get_result_array(imaging, spectrum_name+' volts')
+                times = run.get_result_array(imaging, spectrum_name+' times')
+                
+                warning = run.get_result(imaging, spectrum_name+' warning')
+            except Exception:
+                volts, times, warning = np.array([0.,1.]),np.array([0.,1.]),'no data in shot'
+                tabledata, sig_type = np.array([], dtype = []), 'trace'
+        finally:
+            if hasattr(run, 'close'):
+                run.close()
             
         return volts, times , tabledata, sig_type, warning
 
 class FluoBackgroundDataExtractor(DataExtractor):
+    # Stores 3 full images (Corrected, Signal, Background) per shot; cap to avoid multi-100-MB usage
+    MAX_CACHE_SIZE = 10
+
     def __init__(self, cam, **kwargs):
-        
+
         super().__init__(**kwargs)
-        
+
         self.cam = cam
         
     def extract_data(self, h5_path, h5_file = None):
@@ -484,6 +509,7 @@ class FluoBackgroundDataExtractor(DataExtractor):
             from uncertainties import ufloat
             
             if run is not None:
+                # run will be closed in the finally block below
                 # Try to extract from individual shot file
                 signal_sum = run.get_result(group, prefix + cam + '_signal_sum')
                 signal_uncertainty = run.get_result(group, prefix + cam + '_signal_uncertainty')
@@ -494,6 +520,14 @@ class FluoBackgroundDataExtractor(DataExtractor):
                 # Get image data
                 corrected_image = run.get_result_array(group, prefix + cam + '_corrected_image')
                 background_avg = run.get_result_array(group, prefix + cam + '_background_avg')
+
+                images_dict = {'Corrected': np.array(corrected_image, dtype='float32')}
+                try:
+                    signal_image = run.get_result_array(group, prefix + cam + '_mot_image')
+                    images_dict['Signal'] = np.array(signal_image, dtype='float32')
+                except Exception:
+                    pass
+                images_dict['Background'] = np.array(background_avg, dtype='float32')
                 
                 # Get ROI information
                 signal_roi_x = run.get_result(group, prefix + cam + '_signal_roi_x')
@@ -545,22 +579,25 @@ class FluoBackgroundDataExtractor(DataExtractor):
                 warning = ''
             else:
                 raise ValueError("Individual file not available")
-                
+
         except Exception as e:
-            # Return dummy data if extraction fails
-            # This handles cases where fluo_background_analysis was not run
-            corrected_image = np.zeros((10, 10))
-            background_avg = np.zeros((10, 10))
+            images_dict = {'Corrected': np.zeros((10, 10), dtype='float32')}
             tabledata = np.array([('Status', 'Analysis not available')], dtype=[('Parameter', object), ('Value', object)])
             warning = 'Fluorescence background analysis not available for this shot'
             roi_data = None
-            
-        return corrected_image, background_avg, tabledata, warning, roi_data
+        finally:
+            if run is not None and hasattr(run, 'close'):
+                run.close()
+
+        return images_dict, tabledata, warning, roi_data
 
 
 class ADwinTracesDataExtractor(DataExtractor):
     """Extract ADwin analog input traces for display in analysis plot panel"""
-    
+
+    # Multiple long trace arrays per shot; cap cache to prevent several-hundred-MB usage
+    MAX_CACHE_SIZE = 10
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
@@ -689,3 +726,268 @@ class ADwinTracesDataExtractor(DataExtractor):
             warning = f'Error extracting ADwin traces: {error_msg}'
         
         return traces_dict, tabledata, warning
+
+
+class NuvuDataExtractor(DataExtractor):
+    """Read images saved by nuvu_image_analysis.py (labels starting with 'Nuvu')."""
+
+    GROUP = 'nuvu_image_analysis'
+    MAX_CACHE_SIZE = 10  # Nuvu images are large; limit cache to avoid RAM bloat
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def extract_data(self, h5_path, h5_file=None):
+        """Return (images_dict, warning).
+
+        images_dict maps  '<label>_<image_name>'  to a float32 numpy array.
+        """
+        images = {}
+
+        if not os.path.exists(h5_path):
+            return images, 'shot file missing'
+
+        try:
+            run = lyse.Run(h5_path, no_write=True)
+            try:
+                # Read the index of saved keys
+                keys_str = run.get_result(self.GROUP, 'nuvu_image_keys')
+                if keys_str:
+                    keys = [k for k in keys_str.split(',') if k]
+                    for key in keys:
+                        try:
+                            img = run.get_result_array(self.GROUP, key)
+                            display_key = key[:-len('_image')] if key.endswith('_image') else key
+                            images[display_key] = np.array(img, dtype='float32')
+                        except Exception as e:
+                            print(f'NuvuDataExtractor: could not load key "{key}": {e}')
+            finally:
+                if hasattr(run, 'close'):
+                    run.close()
+        except Exception as e:
+            return images, f'Error reading Nuvu results: {e}'
+
+        warning = '' if images else 'No Nuvu images in results (run nuvu_image_analysis first)'
+        return images, warning
+
+
+class OrcaDataExtractor(DataExtractor):
+    """Read images saved by orca_image_analysis.py (labels starting with 'Orca')."""
+
+    GROUP = 'orca_image_analysis'
+    # ORCA Quest frames are large (up to ~38 MB each as float32); keep only a
+    # small number of shots cached to avoid multi-GB RAM accumulation.
+    MAX_CACHE_SIZE = 5
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def extract_data(self, h5_path, h5_file=None):
+        """Return (images_dict, rois_dict, warning).
+
+        images_dict maps '<label>_<image_name>' to a float32 numpy array.
+        rois_dict   maps the same key to a list of ROI dicts
+                    (keys: x_center, y_center, width, height); may be empty.
+        """
+        images = {}
+        rois = {}
+
+        if not os.path.exists(h5_path):
+            return images, rois, 'shot file missing'
+
+        try:
+            run = lyse.Run(h5_path, no_write=True)
+            try:
+                # Read the index of saved keys
+                keys_str = run.get_result(self.GROUP, 'orca_image_keys')
+                if keys_str:
+                    keys = [k for k in keys_str.split(',') if k]
+                    for key in keys:
+                        try:
+                            img = run.get_result_array(self.GROUP, key)
+                            display_key = key[:-len('_image')] if key.endswith('_image') else key
+                            images[display_key] = np.array(img, dtype='float32')
+                            # ROI metadata is always saved under the base key;
+                            # strip the processed/photons(/filtered) suffix if present to find it.
+                            base_key = (display_key.removesuffix('_processed')
+                                                   .removesuffix('_int')
+                                                   .removesuffix('_filtered')
+                                                   .removesuffix('_photons'))
+                            try:
+                                roi_arr = run.get_result_array(self.GROUP, f'{base_key}_roi_metadata')
+                                rois[display_key] = [
+                                    {'x_center': float(row[0]), 'y_center': float(row[1]),
+                                     'width': float(row[2]), 'height': float(row[3])}
+                                    for row in roi_arr
+                                ]
+                            except Exception:
+                                rois[display_key] = []
+                        except Exception as e:
+                            print(f'OrcaDataExtractor: could not load key "{key}": {e}')
+            finally:
+                if hasattr(run, 'close'):
+                    run.close()
+        except Exception as e:
+            return images, rois, f'Error reading Orca results: {e}'
+
+        warning = '' if images else 'No Orca images in results (run orca_image_analysis first)'
+        return images, rois, warning
+
+
+class OrcaAtomFinderDataExtractor(DataExtractor):
+    """Read the results of orca_atom_finder_analysis.py.
+
+    The processed (photon, dark-subtracted) image and the detections come from
+    the results group; the raw ADU frame is read straight from ``/images`` in
+    the shot file rather than from a second copy in the results, because an
+    ORCA Quest frame is tens of MB and duplicating it per shot is not worth it.
+    """
+
+    GROUP = 'orca_atom_finder'
+    # Raw + processed frame per image, so keep very few shots in RAM.
+    MAX_CACHE_SIZE = 3
+
+    # Scalar results copied into the per-frame metadata dict, with their casts.
+    _FRAME_META = (('n_atoms', int),
+                   ('photons_sum', float),
+                   ('atom_photons_sum', float),
+                   ('dark_subtracted', bool),
+                   ('dark_shots', int))
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def _read_raw(self, h5_path, orientation, label, image_name, crop):
+        """Raw ADU frame from /images, cropped like the processed image."""
+        try:
+            with h5py.File(h5_path, 'r') as f:
+                dataset = f[f'images/{orientation}/{label}/{image_name}']
+                raw = np.array(dataset, dtype='float32')
+        except Exception as e:
+            logger.debug(f'OrcaAtomFinderDataExtractor: no raw frame for '
+                         f'{orientation}/{label}/{image_name}: {e}')
+            return None
+        if raw.ndim == 3:
+            raw = raw[0]
+        if crop is not None:
+            y0, x0, height, width = (int(v) for v in crop)
+            raw = raw[y0:y0 + height, x0:x0 + width]
+        return raw
+
+    def extract_data(self, h5_path, h5_file=None):
+        """Return (frames_dict, warning).
+
+        frames_dict maps '<label>_<image_name>' to a dict with
+            'raw'         float32 image (ADU) or None if it could not be read,
+            'processed'   float32 photon image, dark subtracted,
+            'detections'  (N, 5) array of [x, y, photons, score, snr],
+            'rois'        list of ROI dicts (x_center, y_center, width, height),
+                          the same boxes the "Orca Images" dock draws; may be empty,
+            'meta'        dict of the scalar results (finder label, threshold,
+                          n_atoms, ...).
+
+        Detections and ROIs are both in the coordinates of the saved image, so
+        they line up with it directly even when an analysis window was cropped
+        out of the full frame.
+
+        The warning carries the finder fallbacks (``orca_af_finder_notes``)
+        when there were any, so a shot analysed with something other than the
+        configured finder is flagged rather than silently plotted.
+        """
+        frames = {}
+
+        if not os.path.exists(h5_path):
+            return frames, 'shot file missing'
+
+        try:
+            run = lyse.Run(h5_path, no_write=True)
+            try:
+                index = run.get_result(self.GROUP, 'orca_af_frames')
+
+                # Finder configuration is shot-wide, not per frame
+                common = {}
+                for name in ('orca_af_finder_label', 'orca_af_finder_settings',
+                             'orca_af_finder_requested', 'orca_af_finder_notes',
+                             'orca_af_score_label',
+                             'orca_af_threshold', 'orca_af_aperture_radius'):
+                    try:
+                        value = run.get_result(self.GROUP, name)
+                        if isinstance(value, bytes):
+                            value = value.decode('utf-8')
+                        common[name] = value
+                    except Exception:
+                        pass
+
+                if isinstance(index, bytes):
+                    index = index.decode('utf-8')
+                for entry in (index or '').split(','):
+                    if not entry:
+                        continue
+                    try:
+                        orientation, label, image_name = entry.split('|')
+                    except ValueError:
+                        logger.debug(f'OrcaAtomFinderDataExtractor: bad index entry {entry!r}')
+                        continue
+                    prefix = f'{label}_{image_name}'
+
+                    try:
+                        processed = np.array(
+                            run.get_result_array(self.GROUP, f'{prefix}_photons'),
+                            dtype='float32')
+                    except Exception as e:
+                        print(f'OrcaAtomFinderDataExtractor: could not load '
+                              f'"{prefix}_photons": {e}')
+                        continue
+
+                    try:
+                        crop = np.array(run.get_result_array(self.GROUP, f'{prefix}_crop'))
+                    except Exception:
+                        crop = None
+
+                    try:
+                        detections = np.array(
+                            run.get_result_array(self.GROUP, f'{prefix}_detections'),
+                            dtype=float).reshape(-1, 5)
+                    except Exception:
+                        detections = np.empty((0, 5), dtype=float)
+
+                    # ROI boxes are already in the saved image's coordinates
+                    try:
+                        roi_arr = np.array(
+                            run.get_result_array(self.GROUP, f'{prefix}_roi_metadata'),
+                            dtype=float).reshape(-1, 4)
+                        rois = [{'x_center': float(row[0]), 'y_center': float(row[1]),
+                                 'width': float(row[2]), 'height': float(row[3])}
+                                for row in roi_arr]
+                    except Exception:
+                        rois = []
+
+                    meta = dict(common)
+                    for name, cast in self._FRAME_META:
+                        try:
+                            meta[name] = cast(run.get_result(self.GROUP, f'{prefix}_{name}'))
+                        except Exception:
+                            pass
+
+                    frames[prefix] = {
+                        'raw': self._read_raw(h5_path, orientation, label, image_name, crop),
+                        'processed': processed,
+                        'detections': detections,
+                        'rois': rois,
+                        'meta': meta,
+                    }
+            finally:
+                if hasattr(run, 'close'):
+                    run.close()
+        except Exception as e:
+            return frames, f'Error reading Orca atom finder results: {e}'
+
+        if not frames:
+            return frames, ('No Orca atom finder results '
+                            '(run orca_atom_finder_analysis first)')
+
+        # A finder that fell back to its defaults produces results that look
+        # entirely normal, so the reason is raised to the dock's warning line
+        # rather than left in the details table.
+        notes = (common.get('orca_af_finder_notes') or '').strip()
+        return frames, (f'Finder not as configured - {notes}' if notes else '')

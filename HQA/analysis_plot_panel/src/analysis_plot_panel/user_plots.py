@@ -424,66 +424,116 @@ class TracePlot(AnalysisPlot):
         self.update_warning(warning)
 
 class FluoBackgroundPlot(AnalysisPlot):
-    """Plot for fluorescence background-subtracted images"""
-    
+    """Plot for fluorescence background-subtracted images with image selector and hover readout."""
+
     def __init__(self, title, **kwargs):
-        
         super().__init__(title, **kwargs)
-        
+
         self.setMinimumHeight(500)
         self.setMinimumWidth(800)
-        
-        # Corrected image plot (now full width)
-        self.img_corrected = pg.ImageItem()
-        self.ax_corrected = self.plots.addPlot(title="Corrected Image")
-        self.ax_corrected.addItem(self.img_corrected)
-        
-        # Contrast/color control for corrected image
-        self.hist_corrected = pg.HistogramLUTItem()
-        self.hist_corrected.setImageItem(self.img_corrected)
-        self.plots.addItem(self.hist_corrected)
-        
+
+        # --- image selector bar ---
+        self._selector_widget = QWidget()
+        selector_layout = QHBoxLayout(self._selector_widget)
+        selector_layout.setContentsMargins(4, 2, 4, 2)
+        selector_layout.addWidget(QLabel('Image:'))
+        self._combo = pg.ComboBox()
+        selector_layout.addWidget(self._combo)
+        self._bt_auto = QPushButton('Auto Levels')
+        self._bt_auto.clicked.connect(self._auto_levels)
+        selector_layout.addWidget(self._bt_auto)
+        selector_layout.addStretch()
+
+        self.desciption.nextRow()
+        self.desciption.addWidget(self._selector_widget)
+
+        # --- image display ---
+        self.img_item = pg.ImageItem()
+        self.ax_img = self.plots.addPlot(title='')
+        self.ax_img.addItem(self.img_item)
+
+        self.hist = pg.HistogramLUTItem()
+        self.hist.setImageItem(self.img_item)
+        self.plots.addItem(self.hist)
+
         # ROI rectangles (non-resizable, non-movable)
         self.signal_roi_rect = pg.ROI([0, 0], [1, 1], pen=pg.mkPen('g', width=2), movable=False, resizable=False)
-        self.ax_corrected.addItem(self.signal_roi_rect)
-        
+        self.ax_img.addItem(self.signal_roi_rect)
+
         self.bg_roi_rect = pg.ROI([0, 0], [1, 1], pen=pg.mkPen('r', width=2), movable=False, resizable=False)
-        self.ax_corrected.addItem(self.bg_roi_rect)
-        
+        self.ax_img.addItem(self.bg_roi_rect)
+
+        self.img_item.hoverEvent = self._hover_event
+
+        self._images = {}
+        self._first_image = True
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+
         self.table.setMinimumHeight(100)
 
-        self.bt_auto_levels = QPushButton('Auto Levels', self)
-        self.bt_auto_levels.clicked.connect(self.auto_levels)
-        self.desciption.nextRow()
-        self.desciption.addWidget(self.bt_auto_levels)
-    
-    def auto_levels(self):
-        if hasattr(self, '_last_corrected_image') and self._last_corrected_image is not None:
-            lo = float(np.nanmin(self._last_corrected_image))
-            hi = float(np.nanmax(self._last_corrected_image))
-            self.hist_corrected.setLevels(lo, hi)
+    def _auto_levels(self):
+        key = self._combo.value()
+        if key and key in self._images:
+            img = self._images[key]
+            self.hist.setLevels(float(np.nanmin(img)), float(np.nanmax(img)))
 
-    def update(self, corrected_image, background_avg, tabledata, warning, roi_data=None):
-        
-        # Update corrected image
-        self._last_corrected_image = corrected_image
-        self.img_corrected.setImage(corrected_image.T, autoLevels=False)
-        
-        # Update ROI positions if available
+    def _on_combo_changed(self, _index):
+        key = self._combo.value()
+        if key and key in self._images:
+            self._show_image(key)
+
+    def _show_image(self, key):
+        img = self._images[key]
+        self.img_item.setImage(img.T, autoLevels=False)
+        if self._first_image:
+            self.hist.setLevels(float(np.nanmin(img)), float(np.nanmax(img)))
+            self._first_image = False
+        self.ax_img.setTitle(key)
+
+    def _hover_event(self, event):
+        if event.isExit():
+            self.ax_img.setTitle(self._combo.value() or '')
+            return
+        key = self._combo.value()
+        if not key or key not in self._images:
+            return
+        img = self._images[key]
+        pos = event.pos()
+        i = int(np.clip(pos.y(), 0, img.shape[0] - 1))
+        j = int(np.clip(pos.x(), 0, img.shape[1] - 1))
+        ppos = self.img_item.mapToParent(pos)
+        self.ax_img.setTitle(f'({ppos.x():.0f}, {ppos.y():.0f})  val={img[i, j]:.1f}')
+
+    def update(self, images_dict, tabledata, warning, roi_data=None):
+        self._images = images_dict
+        keys = list(images_dict.keys())
+
+        self._combo.currentIndexChanged.disconnect(self._on_combo_changed)
+        current = self._combo.value()
+        self._combo.clear()
+        for k in keys:
+            self._combo.addItem(k)
+        if current in keys:
+            self._combo.setValue(current)
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+
+        if keys:
+            selected = self._combo.value() if self._combo.value() in keys else keys[0]
+            self._show_image(selected)
+        else:
+            self.img_item.clear()
+
         if roi_data is not None:
-            # Signal ROI (green)
             sig_x, sig_y, sig_w, sig_h = roi_data['signal']
             self.signal_roi_rect.setPos([sig_x - sig_w/2, sig_y - sig_h/2])
             self.signal_roi_rect.setSize([sig_w, sig_h])
-            
-            # Background ROI (red)
+
             bg_x, bg_y, bg_w, bg_h = roi_data['background']
             self.bg_roi_rect.setPos([bg_x - bg_w/2, bg_y - bg_h/2])
             self.bg_roi_rect.setSize([bg_w, bg_h])
-        
-        # Update table and warning
+
         self.table.setData(tabledata)
-        self.update_warning(warning)        
+        self.update_warning(warning)
 
 
 class ADwinTracesPlot(AnalysisPlot):
@@ -856,4 +906,522 @@ class ADwinTracesPlot(AnalysisPlot):
                     self._sb_t1.setValue(t_max)
 
         self.table.setData(tabledata)
+        self.update_warning(warning)
+
+
+class NuvuImagePlot(AnalysisPlot):
+    """Simple image viewer for Nuvu camera images."""
+
+    def __init__(self, title, **kwargs):
+        super().__init__(title, **kwargs)
+
+        self.setMinimumHeight(500)
+        self.setMinimumWidth(600)
+
+        # --- image selector combo box ---
+        self._selector_widget = QWidget()
+        selector_layout = QHBoxLayout(self._selector_widget)
+        selector_layout.setContentsMargins(4, 2, 4, 2)
+        selector_layout.addWidget(QLabel('Image:'))
+        self._combo = pg.ComboBox()
+        selector_layout.addWidget(self._combo)
+
+        self._bt_auto = QPushButton('Auto Levels')
+        self._bt_auto.clicked.connect(self._auto_levels)
+        selector_layout.addWidget(self._bt_auto)
+        selector_layout.addStretch()
+
+        self.desciption.nextRow()
+        self.desciption.addWidget(self._selector_widget)
+
+        # --- image display ---
+        self.img_item = pg.ImageItem()
+        self.ax_img = self.plots.addPlot(title='')
+        self.ax_img.addItem(self.img_item)
+
+        self.hist = pg.HistogramLUTItem()
+        self.hist.setImageItem(self.img_item)
+        self.plots.addItem(self.hist)
+
+        self.img_item.hoverEvent = self._hover_event
+
+        self._images = {}
+        self._first_image = True  # auto-level only on the very first image
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+
+    def _auto_levels(self):
+        key = self._combo.value()
+        if key and key in self._images:
+            img = self._images[key]
+            self.hist.setLevels(float(np.nanmin(img)), float(np.nanmax(img)))
+
+    def _on_combo_changed(self, _index):
+        key = self._combo.value()
+        if key and key in self._images:
+            self._show_image(key)
+
+    def _show_image(self, key):
+        img = self._images[key]
+        self.img_item.setImage(img.T, autoLevels=False)
+        # Only reset levels when first image arrives; afterwards leave the
+        # colorbar where the user set it (same behaviour as FluoBackgroundPlot)
+        if self._first_image:
+            self.hist.setLevels(float(np.nanmin(img)), float(np.nanmax(img)))
+            self._first_image = False
+        self.ax_img.setTitle(key)
+        h, w = img.shape
+        tabledata = np.array(
+            [('Shape', f'{w} x {h} px'),
+             ('Min', f'{np.nanmin(img):.1f}'),
+             ('Max', f'{np.nanmax(img):.1f}'),
+             ('Mean', f'{np.nanmean(img):.1f}')],
+            dtype=[('Property', object), ('Value', object)],
+        )
+        self.table.setData(tabledata)
+
+    def _hover_event(self, event):
+        if event.isExit():
+            self.ax_img.setTitle('')
+            return
+        key = self._combo.value()
+        if not key or key not in self._images:
+            return
+        img = self._images[key]
+        pos = event.pos()
+        i = int(np.clip(pos.y(), 0, img.shape[0] - 1))
+        j = int(np.clip(pos.x(), 0, img.shape[1] - 1))
+        ppos = self.img_item.mapToParent(pos)
+        self.ax_img.setTitle(f'({ppos.x():.0f}, {ppos.y():.0f})  val={img[i, j]:.1f}')
+
+    def update(self, images_dict, warning):
+        self._images = images_dict
+        keys = list(images_dict.keys())
+
+        # Update combo without triggering unnecessary redraws
+        self._combo.currentIndexChanged.disconnect(self._on_combo_changed)
+        current = self._combo.value()
+        self._combo.clear()
+        for k in keys:
+            self._combo.addItem(k)
+        if current in keys:
+            self._combo.setValue(current)
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+
+        if keys:
+            selected = self._combo.value() if self._combo.value() in keys else keys[0]
+            self._show_image(selected)
+        else:
+            self.img_item.clear()
+            self.table.setData(np.array([], dtype=[]))
+
+        self.update_warning(warning)
+
+
+# ── ROI overlay colours (one per ROI slot) ────────────────────────────────────
+_ORCA_ROI_PENS = [
+    pg.mkPen((255, 100,  80), width=2),   # coral red  – ROI 1
+    pg.mkPen(( 80, 180, 255), width=2),   # sky blue   – ROI 2
+]
+
+
+class OrcaImagePlot(NuvuImagePlot):
+    """NuvuImagePlot extended with non-interactive ROI rectangle overlays.
+
+    update() expects (images_dict, rois_dict, warning) as produced by
+    OrcaDataExtractor.  ROI boxes are redrawn whenever the user switches
+    the image in the combo box.
+    """
+
+    def __init__(self, title, **kwargs):
+        super().__init__(title, **kwargs)
+        self._roi_curve_items = []
+        self._rois_dict = {}
+
+    # ------------------------------------------------------------------
+    def _clear_roi_overlays(self):
+        for item in self._roi_curve_items:
+            self.ax_img.removeItem(item)
+        self._roi_curve_items.clear()
+
+    def _draw_roi_overlays(self, roi_list):
+        self._clear_roi_overlays()
+        for i, roi in enumerate(roi_list[:2]):
+            pen = _ORCA_ROI_PENS[i % len(_ORCA_ROI_PENS)]
+            x0 = roi['x_center'] - roi['width']  / 2
+            x1 = roi['x_center'] + roi['width']  / 2
+            y0 = roi['y_center'] - roi['height'] / 2
+            y1 = roi['y_center'] + roi['height'] / 2
+            # Draw a closed rectangle as a curve (does not modify pixel data)
+            curve = pg.PlotCurveItem(
+                [x0, x1, x1, x0, x0],
+                [y0, y0, y1, y1, y0],
+                pen=pen,
+            )
+            self.ax_img.addItem(curve)
+            self._roi_curve_items.append(curve)
+
+    # ------------------------------------------------------------------
+    def _on_combo_changed(self, _index):
+        super()._on_combo_changed(_index)
+        key = self._combo.value()
+        if key:
+            self._draw_roi_overlays(self._rois_dict.get(key, []))
+
+    def update(self, images_dict, rois_dict, warning):
+        self._rois_dict = rois_dict
+        # NuvuImagePlot.update draws the image; we then add ROI boxes on top
+        super().update(images_dict, warning)
+        key = self._combo.value()
+        if key:
+            self._draw_roi_overlays(rois_dict.get(key, []))
+
+
+# ── Atom detection overlay appearance ─────────────────────────────────────────
+_ATOM_PEN = pg.mkPen((255, 80, 80), width=1.5)
+_ATOM_LABEL_COLOR = (255, 160, 100)
+# Drawing a TextItem per atom gets expensive; only annotate the brightest few.
+_MAX_ATOM_LABELS = 40
+
+# View name shown in the selector -> internal view id
+_ORCA_AF_VIEWS = {'raw (ADU)': 'raw',
+                  'photons': 'photons',
+                  'photons + atoms': 'atoms'}
+# Which array of the frame dict a view displays
+_ORCA_AF_SOURCE = {'raw': 'raw', 'photons': 'processed', 'atoms': 'processed'}
+# Views sharing a colour scale: 'photons' and 'atoms' are the same data, so
+# switching between them must not move the colorbar. Raw is in ADU and needs
+# its own levels, which is why they are remembered per group.
+_ORCA_AF_LEVEL_GROUP = {'raw': 'raw', 'photons': 'photons', 'atoms': 'photons'}
+
+
+class OrcaAtomFinderPlot(AnalysisPlot):
+    """Single image view of an Orca frame with a selector for what to display.
+
+    update() expects (frames_dict, warning) as produced by
+    OrcaAtomFinderDataExtractor.  Two selectors drive one image panel: "Frame"
+    picks the camera frame of the shot, "View" picks one of
+
+        raw (ADU) | photons (dark subtracted) | photons + atoms
+
+    In the last view the detections are circled by vector items drawn on top of
+    the image, so the pixel data itself is never touched.  The circles have the
+    radius of the finder's photometry aperture and are drawn in data
+    coordinates, which is why the view keeps a locked aspect ratio.
+
+    "ROIs" overlays the ``orca_roi_center_1/2`` boxes in every view, in the same
+    colours the "Orca Images" dock uses.
+
+    Which finder produced the circles is in the title of the atoms view, and
+    the settings it actually ran with are in the table below - the effective
+    ones, defaults included, not the globals that were meant to produce them.
+    If the two differ (unknown finder name, unusable parameters, a fit that
+    could not be done) the table gains a "Requested" and a "Fallback" row and
+    the shot is flagged in the warning line.
+
+    The colorbar is remembered per view group, because the raw frame is in ADU
+    (a few hundred) while the photon image sits around zero - one shared set of
+    levels would black out whichever view you switched to.
+    """
+
+    def __init__(self, title, **kwargs):
+        super().__init__(title, **kwargs)
+
+        self.setMinimumHeight(500)
+        self.setMinimumWidth(600)
+
+        # --- frame / view selectors ---
+        self._selector_widget = QWidget()
+        selector_layout = QHBoxLayout(self._selector_widget)
+        selector_layout.setContentsMargins(4, 2, 4, 2)
+        selector_layout.addWidget(QLabel('Frame:'))
+        self._combo = pg.ComboBox()
+        selector_layout.addWidget(self._combo)
+
+        selector_layout.addWidget(QLabel('View:'))
+        self._view_combo = pg.ComboBox(items=_ORCA_AF_VIEWS, default='atoms')
+        self._view_combo.currentIndexChanged.connect(self._on_view_changed)
+        selector_layout.addWidget(self._view_combo)
+
+        self._bt_auto = QPushButton('Auto Levels')
+        self._bt_auto.clicked.connect(self._auto_levels)
+        selector_layout.addWidget(self._bt_auto)
+
+        self._cb_labels = QCheckBox('photon labels')
+        self._cb_labels.setChecked(False)
+        self._cb_labels.stateChanged.connect(self._on_labels_toggled)
+        selector_layout.addWidget(self._cb_labels)
+
+        self._cb_rois = QCheckBox('ROIs')
+        self._cb_rois.setChecked(True)
+        self._cb_rois.stateChanged.connect(self._on_rois_toggled)
+        selector_layout.addWidget(self._cb_rois)
+        selector_layout.addStretch()
+
+        self.desciption.nextRow()
+        self.desciption.addWidget(self._selector_widget)
+
+        # --- the one image panel ---
+        self.img_item = pg.ImageItem()
+        self.ax_img = self.plots.addPlot(title='')
+        self.ax_img.addItem(self.img_item)
+        self.ax_img.setAspectLocked(True)
+
+        self._atom_markers = pg.ScatterPlotItem(pen=_ATOM_PEN, brush=None,
+                                                symbol='o', pxMode=False)
+        self.ax_img.addItem(self._atom_markers)
+        self._atom_labels = []
+        self._roi_curve_items = []
+
+        self.hist = pg.HistogramLUTItem()
+        self.hist.setImageItem(self.img_item)
+        self.plots.addItem(self.hist)
+        self.hist.sigLevelsChanged.connect(self._remember_levels)
+
+        self.img_item.hoverEvent = self._hover_event
+
+        self._frames = {}
+        self._levels = {}   # {level group: (min, max)} - see _ORCA_AF_LEVEL_GROUP
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+
+    # ------------------------------------------------------------------
+    def _current_view(self):
+        return self._view_combo.value() or 'atoms'
+
+    def _current_frame(self):
+        key = self._combo.value()
+        if key and key in self._frames:
+            return key, self._frames[key]
+        return None, None
+
+    def _displayed_image(self, frame=None):
+        """The array the selected view shows, or None if it is not available."""
+        if frame is None:
+            _key, frame = self._current_frame()
+        if frame is None:
+            return None
+        img = frame.get(_ORCA_AF_SOURCE[self._current_view()])
+        return img if (img is not None and img.size) else None
+
+    # ------------------------------------------------------------------
+    def _remember_levels(self):
+        """Keep the colorbar the user set, per view group."""
+        self._levels[_ORCA_AF_LEVEL_GROUP[self._current_view()]] = self.hist.getLevels()
+
+    def _auto_levels(self):
+        img = self._displayed_image()
+        if img is None:
+            return
+        self.hist.setLevels(float(np.nanmin(img)), float(np.nanmax(img)))
+
+    def _apply_levels(self, img):
+        """Restore this view group's levels, auto-scaling on its first visit."""
+        group = _ORCA_AF_LEVEL_GROUP[self._current_view()]
+        levels = self._levels.get(group)
+        if levels is None:
+            self.hist.setLevels(float(np.nanmin(img)), float(np.nanmax(img)))
+            self._levels[group] = self.hist.getLevels()
+        else:
+            self.hist.setLevels(*levels)
+
+    # ------------------------------------------------------------------
+    def _on_combo_changed(self, _index):
+        key = self._combo.value()
+        if key and key in self._frames:
+            self._show_frame(key)
+
+    def _on_view_changed(self, _index):
+        key, _frame = self._current_frame()
+        if key:
+            self._show_frame(key)
+
+    def _on_labels_toggled(self, _state):
+        _key, frame = self._current_frame()
+        if frame is not None:
+            self._draw_atom_overlay(frame)
+
+    def _on_rois_toggled(self, _state):
+        _key, frame = self._current_frame()
+        if frame is not None:
+            self._draw_roi_overlays(frame)
+
+    # ------------------------------------------------------------------
+    def _clear_roi_overlays(self):
+        for item in self._roi_curve_items:
+            self.ax_img.removeItem(item)
+        self._roi_curve_items.clear()
+
+    def _draw_roi_overlays(self, frame):
+        """Non-interactive rectangles for the orca_roi_center_1/2 ROIs.
+
+        Same pens as OrcaImagePlot so a ROI is the same colour in both docks.
+        Unlike the atom markers these need no half-pixel shift: a ROI spans
+        pixel columns [x_center - w/2, x_center + w/2), and an ImageItem maps
+        that range onto exactly those coordinates.
+        """
+        self._clear_roi_overlays()
+        if not self._cb_rois.isChecked():
+            return
+        for i, roi in enumerate((frame.get('rois') or [])[:2]):
+            pen = _ORCA_ROI_PENS[i % len(_ORCA_ROI_PENS)]
+            x0 = roi['x_center'] - roi['width']  / 2
+            x1 = roi['x_center'] + roi['width']  / 2
+            y0 = roi['y_center'] - roi['height'] / 2
+            y1 = roi['y_center'] + roi['height'] / 2
+            curve = pg.PlotCurveItem([x0, x1, x1, x0, x0],
+                                     [y0, y0, y1, y1, y0], pen=pen)
+            self.ax_img.addItem(curve)
+            self._roi_curve_items.append(curve)
+
+    # ------------------------------------------------------------------
+    def _clear_atom_labels(self):
+        for item in self._atom_labels:
+            self.ax_img.removeItem(item)
+        self._atom_labels.clear()
+
+    def _clear_overlays(self):
+        self._atom_markers.setData([], [])
+        self._clear_atom_labels()
+        self._clear_roi_overlays()
+
+    def _draw_atom_overlay(self, frame):
+        self._clear_atom_labels()
+        detections = frame.get('detections')
+        if self._current_view() != 'atoms' or detections is None or len(detections) == 0:
+            self._atom_markers.setData([], [])
+            return
+
+        # Detections are integer pixel indices; an ImageItem maps pixel i onto
+        # [i, i+1), so the centre of the pixel sits at i + 0.5.
+        xs = np.asarray(detections[:, 0], dtype=float) + 0.5
+        ys = np.asarray(detections[:, 1], dtype=float) + 0.5
+        radius = float(frame.get('meta', {}).get('orca_af_aperture_radius', 0) or 3)
+        self._atom_markers.setData(x=xs, y=ys, size=2 * radius)
+
+        if self._cb_labels.isChecked():
+            for x, y, photons in zip(xs[:_MAX_ATOM_LABELS], ys[:_MAX_ATOM_LABELS],
+                                     detections[:_MAX_ATOM_LABELS, 2]):
+                text = pg.TextItem(f'{photons:.0f}', color=_ATOM_LABEL_COLOR,
+                                   anchor=(0.5, 1.2))
+                text.setPos(x, y + radius)
+                self.ax_img.addItem(text)
+                self._atom_labels.append(text)
+
+    def _view_title(self, frame):
+        view = self._current_view()
+        meta = frame.get('meta', {})
+        if view == 'raw':
+            return 'raw (ADU)'
+        suffix = '' if meta.get('dark_subtracted', False) else ' (no dark)'
+        if view == 'photons':
+            return 'photons' + suffix
+        detections = frame.get('detections')
+        n_atoms = meta.get('n_atoms', 0 if detections is None else len(detections))
+        # Which finder produced these circles, without having to look at the
+        # table; the bare name only, the settings are a row down there.
+        finder = str(meta.get('orca_af_finder_label', '')).split('(')[0] or 'unknown'
+        return f'photons{suffix} - {n_atoms} atom(s) found  [{finder}]'
+
+    def _show_frame(self, key):
+        frame = self._frames[key]
+        img = self._displayed_image(frame)
+
+        if img is None:
+            self.img_item.clear()
+            self._clear_overlays()
+            self.ax_img.setTitle(f'{self._view_title(frame)} - not available')
+        else:
+            self.img_item.setImage(img.T, autoLevels=False)
+            self._apply_levels(img)
+            self.ax_img.setTitle(self._view_title(frame))
+            self._draw_atom_overlay(frame)
+            self._draw_roi_overlays(frame)
+
+        self._fill_table(key, frame)
+
+    def _fill_table(self, key, frame):
+        proc = frame['processed']
+        detections = frame.get('detections')
+        n_detections = 0 if detections is None else len(detections)
+        meta = frame.get('meta', {})
+        h, w = proc.shape
+
+        threshold = meta.get('orca_af_threshold', float('nan'))
+        try:
+            threshold_text = 'none' if not np.isfinite(threshold) else f'{threshold:g}'
+        except TypeError:
+            threshold_text = str(threshold)
+
+        rows = [
+            ('Frame', key),
+            ('Shape', f'{w} x {h} px'),
+            ('Finder', str(meta.get('orca_af_finder_label', 'unknown'))),
+            # Everything the short label leaves out, so the settings the
+            # detections were made with can be read off the shot itself.
+            ('Finder settings', str(meta.get('orca_af_finder_settings', 'unknown'))),
+            ('Threshold', f'{threshold_text} ({meta.get("orca_af_score_label", "score")})'),
+            ('Aperture radius', f'{meta.get("orca_af_aperture_radius", "?")} px'),
+            ('Atoms found', str(meta.get('n_atoms', n_detections))),
+            ('Photons in frame', f'{meta.get("photons_sum", float(proc.sum())):.0f}'),
+            ('Photons in atoms', f'{meta.get("atom_photons_sum", float("nan")):.0f}'),
+            ('Dark subtracted', ('yes, over '
+                                 f'{meta.get("dark_shots", 0)} shot(s)')
+                                if meta.get('dark_subtracted', False) else 'no'),
+        ]
+        # Only worth the rows when the finder is not the one that was asked
+        # for: then the settings above are not the ones in the globals, and
+        # the notes say which fallback replaced them.
+        notes = [n for n in str(meta.get('orca_af_finder_notes', '') or '').split(' | ') if n]
+        if notes:
+            rows.append(('Requested', str(meta.get('orca_af_finder_requested', 'unknown'))))
+            for i, note in enumerate(notes, start=1):
+                rows.append(('Fallback' if len(notes) == 1 else f'Fallback {i}', note))
+
+        for i, roi in enumerate((frame.get('rois') or [])[:2], start=1):
+            rows.append((f'ROI {i} (x, y)',
+                         f'({roi["x_center"]:.0f}, {roi["y_center"]:.0f})  '
+                         f'{roi["width"]:.0f} x {roi["height"]:.0f} px'))
+        if n_detections:
+            for i, det in enumerate(detections[:10], start=1):
+                rows.append((f'Atom {i} (x, y)',
+                             f'({det[0]:.0f}, {det[1]:.0f})  {det[2]:.1f} photons'))
+
+        self.table.setData(np.array(rows, dtype=[('Property', object), ('Value', object)]))
+
+    def _hover_event(self, event):
+        _key, frame = self._current_frame()
+        if event.isExit() or frame is None:
+            if frame is not None:
+                self.ax_img.setTitle(self._view_title(frame))
+            return
+        img = self._displayed_image(frame)
+        if img is None:
+            return
+        pos = event.pos()
+        i = int(np.clip(pos.y(), 0, img.shape[0] - 1))
+        j = int(np.clip(pos.x(), 0, img.shape[1] - 1))
+        self.ax_img.setTitle(f'({j}, {i})  val={img[i, j]:.1f}')
+
+    # ------------------------------------------------------------------
+    def update(self, frames_dict, warning):
+        self._frames = frames_dict
+        keys = list(frames_dict.keys())
+
+        # Update the combo without triggering unnecessary redraws
+        self._combo.currentIndexChanged.disconnect(self._on_combo_changed)
+        current = self._combo.value()
+        self._combo.clear()
+        for k in keys:
+            self._combo.addItem(k)
+        if current in keys:
+            self._combo.setValue(current)
+        self._combo.currentIndexChanged.connect(self._on_combo_changed)
+
+        if keys:
+            selected = self._combo.value() if self._combo.value() in keys else keys[0]
+            self._show_frame(selected)
+        else:
+            self.img_item.clear()
+            self._clear_overlays()
+            self.table.setData(np.array([], dtype=[]))
+
         self.update_warning(warning)

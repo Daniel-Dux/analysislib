@@ -129,8 +129,9 @@ def main():
         print("[influxdb_writer] Dataframe is empty — nothing to send.")
         return
 
-    # The last row is the current shot
-    shot_row = df.iloc[-1]
+    # The last row is the current shot; sort index so MultiIndex tuple
+    # lookups don't trigger a PerformanceWarning.
+    shot_row = df.iloc[-1].sort_index()
 
     # -- Gather globals from the HDF5 file ----------------------------------
     run_globals = _get_globals(h5_path)
